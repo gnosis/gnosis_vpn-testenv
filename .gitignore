@@ -1,0 +1,11 @@
+# direnv cache
+.direnv/
+
+# nix build symlinks
+result*
+
+# macOS
+.DS_Store
+
+# logs
+*.log
