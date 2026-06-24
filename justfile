@@ -14,8 +14,10 @@ SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
 
-# Log level for the VPN client (passed as RUST_LOG)
-CLIENT_LOG_LEVEL := env_var_or_default("CLIENT_LOG_LEVEL", "debug")
+# Log levels for each component (passed as RUST_LOG)
+CLIENT_LOG_LEVEL  := env_var_or_default("CLIENT_LOG_LEVEL",  "info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
+SERVER_LOG_LEVEL  := env_var_or_default("SERVER_LOG_LEVEL",  "info")
+CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 
 # Generated config output dir
 CONFIG_DIR := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
@@ -49,7 +51,7 @@ cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf "{{DATA_DIR}}"
-    RUST_LOG=info \
+    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
         "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
         --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
         --chain-image "{{CHAIN_IMAGE}}" \
@@ -99,7 +101,7 @@ server-start:
         private_key=$(wg genkey)
         docker run --rm --detach \
             --env  "PRIVATE_KEY=${private_key}" \
-            --env  RUST_LOG=info \
+            --env  "RUST_LOG={{SERVER_LOG_LEVEL}}" \
             --publish "${api_port}:8000" \
             --publish "${wg_port}:51820/udp" \
             --cap-add=NET_ADMIN \
