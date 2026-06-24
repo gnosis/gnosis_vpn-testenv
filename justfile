@@ -139,22 +139,31 @@ gen-config:
     while IFS= read -r node; do
         id=$(echo "${node}"      | jq -r '.id')
         address=$(echo "${node}" | jq -r '.address')
-        destinations+="[destinations.node-${id}]\n"
-        destinations+="address = \"${address}\"\n"
-        destinations+="meta    = { location = \"localcluster\" }\n"
-        destinations+="path    = { hops = {{HOPS}} }\n\n"
+        destinations+=$(cat <<EOF
+[destinations.node-${id}]
+address = "${address}"
+meta    = { location = "localcluster" }
+path    = { hops = {{HOPS}} }
+
+EOF
+)
     done < <(echo "${status}" | jq -c '.nodes[]')
 
-    # server-0 is the static connection target for this client config version
-    bridge_target="127.0.0.1:8000"
-    wg_target="127.0.0.1:51821"
+    cat > "{{CONFIG_DIR}}/client.toml" <<EOF
+version = 6
 
-    DESTINATIONS="${destinations}" \
-    BRIDGE_TARGET="${bridge_target}" \
-    WG_TARGET="${wg_target}" \
-        envsubst '$DESTINATIONS,$BRIDGE_TARGET,$WG_TARGET' \
-        < "$(dirname "{{justfile()}}")/configs/client.toml.tmpl" \
-        > "{{CONFIG_DIR}}/client.toml"
+${destinations}
+[connection.bridge]
+capabilities = ["segmentation", "retransmission", "retransmission_ack_only", "no_rate_control"]
+target = "127.0.0.1:8000"
+
+[connection.wg]
+capabilities = ["segmentation", "no_delay"]
+target = "127.0.0.1:51821"
+
+[connection.ping]
+address = "10.128.0.1"
+EOF
 
     echo "${blokli_url}" > "{{CONFIG_DIR}}/blokli_url"
     echo "Generated {{CONFIG_DIR}}/client.toml"
