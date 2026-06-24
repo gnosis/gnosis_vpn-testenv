@@ -11,6 +11,9 @@ native Gnosis VPN client against them.
   shell to avoid nesting issues)
 - Docker (or Podman / Apple `container`)
 - Sibling repos checked out at the paths below (overridable)
+- A local OS user that `gnosis_vpn-worker` runs as — `gnosis_vpn-root` drops
+  privileges to this user when spawning the worker. Defaults to `gnosisvpn`;
+  override via `CLIENT_WORKER_USER`.
 
 ## Sibling repo paths
 
@@ -72,6 +75,7 @@ just down
 | `CLUSTER_SIZE`    | `3`                       | Number of HOPR nodes in localcluster |
 | `SERVER_COUNT`    | `1`                       | Number of VPN server containers      |
 | `HOPS`            | `1`                       | Session hop count for destinations   |
+| `CLIENT_WORKER_USER` | `gnosisvpn`            | OS user the worker process runs as   |
 | `DATA_DIR`        | `/tmp/hopr-nodes`         | Localcluster data directory          |
 | `CONFIG_DIR`      | `/tmp/gnosis-vpn-testenv` | Generated config output directory    |
 | `CHAIN_IMAGE`     | `…/bloklid-anvil:latest`  | Blokli + Anvil container image       |
