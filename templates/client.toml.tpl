@@ -1,6 +1,7 @@
 version = 6
 
-${DESTINATIONS}[connection.bridge]
+${DESTINATIONS}
+[connection.bridge]
 target = "127.0.0.1:8000"
 
 [connection.wg]
