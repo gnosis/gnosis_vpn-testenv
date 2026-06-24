@@ -14,6 +14,9 @@ SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
 
+# Log level for the VPN client (passed as RUST_LOG)
+CLIENT_LOG_LEVEL := env_var_or_default("CLIENT_LOG_LEVEL", "debug")
+
 # Generated config output dir
 CONFIG_DIR := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
 
@@ -172,7 +175,7 @@ client-start:
     #!/usr/bin/env bash
     set -euo pipefail
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
-    sudo RUST_LOG=debug \
+    sudo RUST_LOG={{CLIENT_LOG_LEVEL}} \
         "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root" \
         -c "{{CONFIG_DIR}}/client.toml" \
         --hopr-blokli-url "${blokli_url}" &
