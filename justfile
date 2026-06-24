@@ -19,6 +19,9 @@ CLIENT_LOG_LEVEL  := env_var_or_default("CLIENT_LOG_LEVEL",  "info,gnosis_vpn_ro
 SERVER_LOG_LEVEL  := env_var_or_default("SERVER_LOG_LEVEL",  "info")
 CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 
+# Client log file path
+CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis-vpn-client.log")
+
 # Generated config output dir
 CONFIG_DIR := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
 
@@ -193,7 +196,8 @@ client-start:
         -c "{{CONFIG_DIR}}/client.toml" \
         --hopr-blokli-url "${blokli_url}" \
         --hopr-identity-file "${extra_id_file}" \
-        --hopr-identity-pass "${extra_id_pass}" &
+        --hopr-identity-pass "${extra_id_pass}" \
+        --log-file "{{CLIENT_LOG_FILE}}" &
     echo $! > /tmp/gnosis-vpn-client.pid
     echo "Client PID: $(cat /tmp/gnosis-vpn-client.pid)"
 
@@ -244,6 +248,6 @@ up: cluster-start cluster-wait server-start gen-config
 # Tear the full stack down
 down: client-stop server-stop cluster-stop
 
-# Tail all cluster node logs
+# Tail all cluster node logs and client log
 logs:
-    tail -f "{{DATA_DIR}}/logs/"*.log
+    tail -f "{{DATA_DIR}}/logs/"*.log "{{CLIENT_LOG_FILE}}"
