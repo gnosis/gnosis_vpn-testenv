@@ -189,6 +189,7 @@ client-start:
         --hopr-identity-file "${extra_id_file}" \
         --hopr-identity-pass "${extra_id_pass}" \
         --worker-user "{{CLIENT_WORKER_USER}}" \
+        --worker-binary "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" \
         --log-file "{{CLIENT_LOG_FILE}}" &
     echo $! > /tmp/gnosis-vpn-client.pid
     echo "Client PID: $(cat /tmp/gnosis-vpn-client.pid)"
