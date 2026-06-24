@@ -39,6 +39,7 @@
             packages =
               with pkgs;
               [
+                gettext
                 jq
                 wireguard-tools
                 config.treefmt.build.wrapper

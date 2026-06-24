@@ -23,7 +23,8 @@ CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis-vpn-client.log")
 
 # Generated config output dir
-CONFIG_DIR := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
+CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
+TEMPLATES_DIR := justfile_directory() + "/templates"
 
 # List available recipes
 default:
@@ -142,31 +143,16 @@ gen-config:
     while IFS= read -r node; do
         id=$(echo "${node}"      | jq -r '.id')
         address=$(echo "${node}" | jq -r '.address')
-        destinations+=$(cat <<EOF
-[destinations.node-${id}]
-address = "${address}"
-meta    = { location = "localcluster" }
-path    = { hops = {{HOPS}} }
-
-EOF
-)
+        block=$(DEST_ID="${id}" DEST_ADDRESS="${address}" DEST_HOPS="{{HOPS}}" \
+            envsubst '$DEST_ID,$DEST_ADDRESS,$DEST_HOPS' \
+            < "{{TEMPLATES_DIR}}/destination.toml.tpl")
+        destinations+="${block}"$'\n'
     done < <(echo "${status}" | jq -c '.nodes[]')
 
-    cat > "{{CONFIG_DIR}}/client.toml" <<EOF
-version = 6
-
-${destinations}
-[connection.bridge]
-capabilities = ["segmentation", "retransmission", "retransmission_ack_only", "no_rate_control"]
-target = "127.0.0.1:8000"
-
-[connection.wg]
-capabilities = ["segmentation", "no_delay"]
-target = "127.0.0.1:51821"
-
-[connection.ping]
-address = "10.128.0.1"
-EOF
+    DESTINATIONS="${destinations}" \
+        envsubst '$DESTINATIONS' \
+        < "{{TEMPLATES_DIR}}/client.toml.tpl" \
+        > "{{CONFIG_DIR}}/client.toml"
 
     echo "${blokli_url}" > "{{CONFIG_DIR}}/blokli_url"
     echo "Generated {{CONFIG_DIR}}/client.toml"
