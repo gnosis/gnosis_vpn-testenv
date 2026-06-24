@@ -22,6 +22,9 @@ CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 # Client log file path
 CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis-vpn-client.log")
 
+# OS user the worker process runs as
+CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpn")
+
 # Generated config output dir
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
@@ -177,12 +180,15 @@ client-start:
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
     extra_id_file="{{CONFIG_DIR}}/extra_id.id"
     extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    # sudo backgrounded can't read TTY; pre-authenticate while still interactive
+    sudo -v
     sudo RUST_LOG={{CLIENT_LOG_LEVEL}} \
         "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root" \
         -c "{{CONFIG_DIR}}/client.toml" \
         --hopr-blokli-url "${blokli_url}" \
         --hopr-identity-file "${extra_id_file}" \
         --hopr-identity-pass "${extra_id_pass}" \
+        --worker-user "{{CLIENT_WORKER_USER}}" \
         --log-file "{{CLIENT_LOG_FILE}}" &
     echo $! > /tmp/gnosis-vpn-client.pid
     echo "Client PID: $(cat /tmp/gnosis-vpn-client.pid)"
