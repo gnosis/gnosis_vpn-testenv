@@ -186,10 +186,13 @@ client-start:
     #!/usr/bin/env bash
     set -euo pipefail
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
+    extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
     sudo RUST_LOG={{CLIENT_LOG_LEVEL}} \
         "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root" \
         -c "{{CONFIG_DIR}}/client.toml" \
-        --hopr-blokli-url "${blokli_url}" &
+        --hopr-blokli-url "${blokli_url}" \
+        --hopr-identity-file "{{CONFIG_DIR}}/extra_id.id" \
+        --hopr-identity-pass "${extra_id_pass}" &
     echo $! > /tmp/gnosis-vpn-client.pid
     echo "Client PID: $(cat /tmp/gnosis-vpn-client.pid)"
 
