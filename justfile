@@ -94,6 +94,7 @@ cluster-stop:
     fi
     pkill -f hoprd-localcluster 2>/dev/null || true
     pkill -f "result-hoprd/bin/hoprd" 2>/dev/null || true
+    docker rm -f hopr-chain 2>/dev/null || true
     echo "Cluster stopped"
 
 # ─── VPN Servers ─────────────────────────────────────────────────────────────
