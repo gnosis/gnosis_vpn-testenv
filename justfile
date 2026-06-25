@@ -290,6 +290,16 @@ up: metrics-start cluster-start cluster-wait server-start gen-config
 # Tear the full stack down
 down: client-stop server-stop cluster-stop metrics-stop
 
+# Remove all generated configs, data, PID files, logs, and the chain container
+clean:
+    rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}"
+    rm -f /tmp/hoprd-localcluster.pid /tmp/gnosis_vpn-client.pid "{{CLIENT_LOG_FILE}}" /tmp/gnosis_vpn-worker
+    docker rm -f hopr-chain 2>/dev/null || true
+    echo "Clean done"
+
+# Tear the full stack down and wipe all state
+reset: down clean
+
 # Full development setup: cluster + server + config, then prints the client run command.
 # Set CLIENT_WORKER_USER to the OS user the worker runs as (must exist — see README).
 development-setup: metrics-start cluster-start cluster-wait server-start gen-config
