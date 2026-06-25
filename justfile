@@ -57,6 +57,12 @@ build: build-cluster build-server build-client
 cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    pid_file=/tmp/hoprd-localcluster.pid
+    if [ -f "${pid_file}" ] && kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
+        echo "Cluster already running — skipping start"
+        echo "Localcluster PID: $(cat "${pid_file}")"
+        exit 0
+    fi
     rm -rf "{{DATA_DIR}}"
     RUST_LOG={{CLUSTER_LOG_LEVEL}} \
         "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
@@ -107,6 +113,11 @@ server-start:
         name="gnosis_vpn-server-${i}"
         wg_port=$((51821 + i))
         api_port=$((8000 + i))
+        if docker container inspect "${name}" > /dev/null 2>&1; then
+            echo "${name} already exists — skipping start"
+            echo "  WireGuard: ${wg_port}/udp, API: ${api_port}"
+            continue
+        fi
         private_key=$(wg genkey)
         docker run --rm --detach \
             --env  "PRIVATE_KEY=${private_key}" \
@@ -179,6 +190,12 @@ gen-config:
 client-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    pid_file=/tmp/gnosis_vpn-client.pid
+    if [ -f "${pid_file}" ] && sudo kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
+        echo "Client already running — skipping start"
+        echo "Client PID: $(cat "${pid_file}")"
+        exit 0
+    fi
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
     extra_id_file="{{CONFIG_DIR}}/extra_id.id"
     extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
