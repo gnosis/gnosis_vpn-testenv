@@ -252,25 +252,28 @@ development-setup: cluster-start cluster-wait server-start gen-config
     root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
     id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    log_level="{{CLIENT_LOG_LEVEL}}"
+    config_dir="{{CONFIG_DIR}}"
+    worker_user="{{CLIENT_WORKER_USER}}"
+    # octal \134 = backslash; avoids \\ in the justfile which just 1.43+ rejects
+    bs=$'\134'
 
-    sudo chown "{{CLIENT_WORKER_USER}}" "${worker_bin}"
+    sudo chown "${worker_user}" "${worker_bin}"
 
     echo ""
     echo "Stack is up. Run the client with:"
     echo ""
-    cat <<EOF
-sudo RUST_LOG="{{CLIENT_LOG_LEVEL}}" \\
-     ${root_bin} \\
-     -c {{CONFIG_DIR}}/client.toml \\
-     --hopr-blokli-url "${blokli_url}" \\
-     --hopr-identity-file {{CONFIG_DIR}}/extra_id.id \\
-     --hopr-identity-pass "${id_pass}" \\
-     --worker-binary ${worker_bin} \\
-     --worker-user {{CLIENT_WORKER_USER}} \\
-     --allow-insecure \\
-     --allow-experimental \\
-     --client-autostart 30min
-EOF
+    echo "sudo RUST_LOG=\"${log_level}\" ${bs}"
+    echo "     ${root_bin} ${bs}"
+    echo "     -c ${config_dir}/client.toml ${bs}"
+    echo "     --hopr-blokli-url \"${blokli_url}\" ${bs}"
+    echo "     --hopr-identity-file ${config_dir}/extra_id.id ${bs}"
+    echo "     --hopr-identity-pass \"${id_pass}\" ${bs}"
+    echo "     --worker-binary ${worker_bin} ${bs}"
+    echo "     --worker-user ${worker_user} ${bs}"
+    echo "     --allow-insecure ${bs}"
+    echo "     --allow-experimental ${bs}"
+    echo "     --client-autostart 30min"
     echo ""
 
 # Tail all cluster node logs and client log

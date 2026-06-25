@@ -54,11 +54,11 @@ just down
 ```
 
 `just development-setup` starts the localcluster, VPN server(s), generates
-client config, sets the correct ownership on the worker binary, and prints
-the exact `sudo` command to start the client — copy-paste it to run.
+client config, sets the correct ownership on the worker binary, and prints the
+exact `sudo` command to start the client — copy-paste it to run.
 
-`just up` covers steps 2 without the worker chown or client command hint;
-useful for scripting and CI.
+`just up` covers steps 2 without the worker chown or client command hint; useful
+for scripting and CI.
 
 ## Running system tests
 
@@ -71,18 +71,18 @@ just down
 
 ## Configuration variables
 
-| Variable          | Default                   | Purpose                              |
-| ----------------- | ------------------------- | ------------------------------------ |
-| `HOPRD_DIR`       | `../hoprd`                | Path to hoprd repo                   |
-| `GVPN_SERVER_DIR` | `../gnosis_vpn-server`    | Path to gnosis_vpn-server repo       |
-| `GVPN_CLIENT_DIR` | `../gnosis_vpn-client`    | Path to gnosis_vpn-client repo       |
-| `CLUSTER_SIZE`    | `3`                       | Number of HOPR nodes in localcluster |
-| `SERVER_COUNT`    | `1`                       | Number of VPN server containers      |
-| `HOPS`            | `1`                       | Session hop count for destinations   |
-| `CLIENT_WORKER_USER` | `gnosisvpn`            | OS user the worker process runs as   |
-| `DATA_DIR`        | `/tmp/hopr-nodes`         | Localcluster data directory          |
-| `CONFIG_DIR`      | `/tmp/gnosis_vpn-testenv` | Generated config output directory    |
-| `CHAIN_IMAGE`     | `…/bloklid-anvil:latest`  | Blokli + Anvil container image       |
+| Variable             | Default                   | Purpose                              |
+| -------------------- | ------------------------- | ------------------------------------ |
+| `HOPRD_DIR`          | `../hoprd`                | Path to hoprd repo                   |
+| `GVPN_SERVER_DIR`    | `../gnosis_vpn-server`    | Path to gnosis_vpn-server repo       |
+| `GVPN_CLIENT_DIR`    | `../gnosis_vpn-client`    | Path to gnosis_vpn-client repo       |
+| `CLUSTER_SIZE`       | `3`                       | Number of HOPR nodes in localcluster |
+| `SERVER_COUNT`       | `1`                       | Number of VPN server containers      |
+| `HOPS`               | `1`                       | Session hop count for destinations   |
+| `CLIENT_WORKER_USER` | `gnosisvpn`               | OS user the worker process runs as   |
+| `DATA_DIR`           | `/tmp/hopr-nodes`         | Localcluster data directory          |
+| `CONFIG_DIR`         | `/tmp/gnosis_vpn-testenv` | Generated config output directory    |
+| `CHAIN_IMAGE`        | `…/bloklid-anvil:latest`  | Blokli + Anvil container image       |
 
 ## Port assignments
 
