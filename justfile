@@ -11,6 +11,9 @@ CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/
 # VPN server settings
 SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 
+# Grafana UI port for the otel-lgtm metrics container (OTLP HTTP always binds 4318)
+METRICS_GRAFANA_PORT := env_var_or_default("METRICS_GRAFANA_PORT", "3000")
+
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
 
@@ -252,17 +255,44 @@ system-tests:
     SYSTEM_TEST_WORKER_BINARY="${worker_binary}" \
         just -d "{{GVPN_CLIENT_DIR}}" -f "{{GVPN_CLIENT_DIR}}/justfile" system-tests
 
+# ─── Metrics ─────────────────────────────────────────────────────────────────
+
+# Start grafana/otel-lgtm: accepts OTLP on :4318, exposes Grafana on :METRICS_GRAFANA_PORT
+metrics-start:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name="hopr-metrics"
+    if docker container inspect "${name}" > /dev/null 2>&1; then
+        echo "${name} already exists — skipping start"
+        echo "  Grafana: http://localhost:{{METRICS_GRAFANA_PORT}} (admin/admin)"
+        exit 0
+    fi
+    docker run --rm --detach \
+        --publish "{{METRICS_GRAFANA_PORT}}:3000" \
+        --publish "4318:4318" \
+        --name "${name}" \
+        grafana/otel-lgtm
+    echo "Started ${name} — Grafana: http://localhost:{{METRICS_GRAFANA_PORT}} (admin/admin)"
+
+# Stop the grafana/otel-lgtm metrics container
+metrics-stop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker stop hopr-metrics 2>/dev/null \
+        && echo "Stopped hopr-metrics" \
+        || echo "hopr-metrics was not running"
+
 # ─── Composite ───────────────────────────────────────────────────────────────
 
 # Bring the full stack up; client-start is intentionally separate (needs sudo)
-up: cluster-start cluster-wait server-start gen-config
+up: metrics-start cluster-start cluster-wait server-start gen-config
 
 # Tear the full stack down
-down: client-stop server-stop cluster-stop
+down: client-stop server-stop cluster-stop metrics-stop
 
 # Full development setup: cluster + server + config, then prints the client run command.
 # Set CLIENT_WORKER_USER to the OS user the worker runs as (must exist — see README).
-development-setup: cluster-start cluster-wait server-start gen-config
+development-setup: metrics-start cluster-start cluster-wait server-start gen-config
     #!/usr/bin/env bash
     set -euo pipefail
     worker_bin_src="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
@@ -280,6 +310,8 @@ development-setup: cluster-start cluster-wait server-start gen-config
     cp "${worker_bin_src}" "${worker_bin}"
     sudo chown "${worker_user}" "${worker_bin}"
 
+    echo ""
+    echo "Metrics: http://localhost:{{METRICS_GRAFANA_PORT}} (admin/admin) — explore hoprd_* in the Mimir datasource"
     echo ""
     echo "Stack is up. Run the client with:"
     echo ""
