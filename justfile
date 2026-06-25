@@ -243,6 +243,36 @@ up: cluster-start cluster-wait server-start gen-config
 # Tear the full stack down
 down: client-stop server-stop cluster-stop
 
+# Full development setup: cluster + server + config, then prints the client run command.
+# Set CLIENT_WORKER_USER to the OS user the worker runs as (must exist — see README).
+development-setup: cluster-start cluster-wait server-start gen-config
+    #!/usr/bin/env bash
+    set -euo pipefail
+    worker_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
+    id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+
+    sudo chown "{{CLIENT_WORKER_USER}}" "${worker_bin}"
+
+    echo ""
+    echo "Stack is up. Run the client with:"
+    echo ""
+    cat <<EOF
+sudo RUST_LOG="{{CLIENT_LOG_LEVEL}}" \\
+     ${root_bin} \\
+     -c {{CONFIG_DIR}}/client.toml \\
+     --hopr-blokli-url "${blokli_url}" \\
+     --hopr-identity-file {{CONFIG_DIR}}/extra_id.id \\
+     --hopr-identity-pass "${id_pass}" \\
+     --worker-binary ${worker_bin} \\
+     --worker-user {{CLIENT_WORKER_USER}} \\
+     --allow-insecure \\
+     --allow-experimental \\
+     --client-autostart 30min
+EOF
+    echo ""
+
 # Tail all cluster node logs and client log
 logs:
     tail -f "{{DATA_DIR}}/logs/"*.log "{{CLIENT_LOG_FILE}}"
