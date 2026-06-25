@@ -265,7 +265,7 @@ down: client-stop server-stop cluster-stop
 development-setup: cluster-start cluster-wait server-start gen-config
     #!/usr/bin/env bash
     set -euo pipefail
-    worker_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    worker_bin_src="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
     root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
     id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
@@ -275,6 +275,9 @@ development-setup: cluster-start cluster-wait server-start gen-config
     # octal \134 = backslash; avoids \\ in the justfile which just 1.43+ rejects
     bs=$'\134'
 
+    # The Nix store is read-only, so copy the worker to /tmp before chown-ing it
+    worker_bin="/tmp/gnosis_vpn-worker"
+    cp "${worker_bin_src}" "${worker_bin}"
     sudo chown "${worker_user}" "${worker_bin}"
 
     echo ""
