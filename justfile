@@ -293,7 +293,8 @@ down: client-stop server-stop cluster-stop metrics-stop
 # Remove all generated configs, data, PID files, logs, and the chain container
 clean:
     rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}"
-    rm -f /tmp/hoprd-localcluster.pid /tmp/gnosis_vpn-client.pid "{{CLIENT_LOG_FILE}}" /tmp/gnosis_vpn-worker
+    rm -f /tmp/hoprd-localcluster.pid /tmp/gnosis_vpn-client.pid "{{CLIENT_LOG_FILE}}"
+    sudo rm -f /tmp/gnosis_vpn-worker
     docker rm -f hopr-chain 2>/dev/null || true
     echo "Clean done"
 
