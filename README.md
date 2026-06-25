@@ -77,7 +77,7 @@ just down
 | `HOPS`            | `1`                       | Session hop count for destinations   |
 | `CLIENT_WORKER_USER` | `gnosisvpn`            | OS user the worker process runs as   |
 | `DATA_DIR`        | `/tmp/hopr-nodes`         | Localcluster data directory          |
-| `CONFIG_DIR`      | `/tmp/gnosis-vpn-testenv` | Generated config output directory    |
+| `CONFIG_DIR`      | `/tmp/gnosis_vpn-testenv` | Generated config output directory    |
 | `CHAIN_IMAGE`     | `…/bloklid-anvil:latest`  | Blokli + Anvil container image       |
 
 ## Port assignments

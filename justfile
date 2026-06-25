@@ -20,13 +20,13 @@ SERVER_LOG_LEVEL  := env_var_or_default("SERVER_LOG_LEVEL",  "info")
 CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 
 # Client log file path
-CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis-vpn-client.log")
+CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client.log")
 
 # OS user the worker process runs as
 CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpn")
 
 # Generated config output dir
-CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
+CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
 
 # List available recipes
@@ -193,14 +193,14 @@ client-start:
         --worker-user "{{CLIENT_WORKER_USER}}" \
         --worker-binary "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" \
         --log-file "{{CLIENT_LOG_FILE}}" &
-    echo $! > /tmp/gnosis-vpn-client.pid
-    echo "Client PID: $(cat /tmp/gnosis-vpn-client.pid)"
+    echo $! > /tmp/gnosis_vpn-client.pid
+    echo "Client PID: $(cat /tmp/gnosis_vpn-client.pid)"
 
 # Stop gnosis_vpn-client (cascades SIGTERM to the worker via gnosis_vpn-root)
 client-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid_file=/tmp/gnosis-vpn-client.pid
+    pid_file=/tmp/gnosis_vpn-client.pid
     if [ -f "${pid_file}" ]; then
         sudo kill "$(cat "${pid_file}")" 2>/dev/null || true
         rm -f "${pid_file}"
