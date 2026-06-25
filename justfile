@@ -14,8 +14,20 @@ SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
 
+# Log levels for each component (passed as RUST_LOG)
+CLIENT_LOG_LEVEL  := env_var_or_default("CLIENT_LOG_LEVEL",  "info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
+SERVER_LOG_LEVEL  := env_var_or_default("SERVER_LOG_LEVEL",  "info")
+CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
+
+# Client log file path
+CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client.log")
+
+# OS user the worker process runs as
+CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpn")
+
 # Generated config output dir
-CONFIG_DIR := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
+CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
+TEMPLATES_DIR := justfile_directory() + "/templates"
 
 # List available recipes
 default:
@@ -45,8 +57,14 @@ build: build-cluster build-server build-client
 cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    pid_file=/tmp/hoprd-localcluster.pid
+    if [ -f "${pid_file}" ] && kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
+        echo "Cluster already running — skipping start"
+        echo "Localcluster PID: $(cat "${pid_file}")"
+        exit 0
+    fi
     rm -rf "{{DATA_DIR}}"
-    RUST_LOG=info \
+    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
         "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
         --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
         --chain-image "{{CHAIN_IMAGE}}" \
@@ -81,6 +99,8 @@ cluster-stop:
         rm -f "${pid_file}"
     fi
     pkill -f hoprd-localcluster 2>/dev/null || true
+    pkill -f "result-hoprd/bin/hoprd" 2>/dev/null || true
+    docker rm -f hopr-chain 2>/dev/null || true
     echo "Cluster stopped"
 
 # ─── VPN Servers ─────────────────────────────────────────────────────────────
@@ -93,10 +113,15 @@ server-start:
         name="gnosis_vpn-server-${i}"
         wg_port=$((51821 + i))
         api_port=$((8000 + i))
+        if docker container inspect "${name}" > /dev/null 2>&1; then
+            echo "${name} already exists — skipping start"
+            echo "  WireGuard: ${wg_port}/udp, API: ${api_port}"
+            continue
+        fi
         private_key=$(wg genkey)
         docker run --rm --detach \
             --env  "PRIVATE_KEY=${private_key}" \
-            --env  RUST_LOG=info \
+            --env  "RUST_LOG={{SERVER_LOG_LEVEL}}" \
             --publish "${api_port}:8000" \
             --publish "${wg_port}:51820/udp" \
             --cap-add=NET_ADMIN \
@@ -134,21 +159,15 @@ gen-config:
     while IFS= read -r node; do
         id=$(echo "${node}"      | jq -r '.id')
         address=$(echo "${node}" | jq -r '.address')
-        destinations+="[destinations.node-${id}]\n"
-        destinations+="address = \"${address}\"\n"
-        destinations+="meta    = { location = \"localcluster\" }\n"
-        destinations+="path    = { hops = {{HOPS}} }\n\n"
+        block=$(DEST_ID="${id}" DEST_ADDRESS="${address}" DEST_HOPS="{{HOPS}}" \
+            envsubst '$DEST_ID,$DEST_ADDRESS,$DEST_HOPS' \
+            < "{{TEMPLATES_DIR}}/destination.toml.tpl")
+        destinations+="${block}"$'\n'
     done < <(echo "${status}" | jq -c '.nodes[]')
 
-    # server-0 is the static connection target for this client config version
-    bridge_target="127.0.0.1:8000"
-    wg_target="127.0.0.1:51821"
-
     DESTINATIONS="${destinations}" \
-    BRIDGE_TARGET="${bridge_target}" \
-    WG_TARGET="${wg_target}" \
-        envsubst '$DESTINATIONS,$BRIDGE_TARGET,$WG_TARGET' \
-        < "$(dirname "{{justfile()}}")/configs/client.toml.tmpl" \
+        envsubst '$DESTINATIONS' \
+        < "{{TEMPLATES_DIR}}/client.toml.tpl" \
         > "{{CONFIG_DIR}}/client.toml"
 
     echo "${blokli_url}" > "{{CONFIG_DIR}}/blokli_url"
@@ -171,19 +190,34 @@ gen-config:
 client-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    pid_file=/tmp/gnosis_vpn-client.pid
+    if [ -f "${pid_file}" ] && sudo kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
+        echo "Client already running — skipping start"
+        echo "Client PID: $(cat "${pid_file}")"
+        exit 0
+    fi
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
-    sudo RUST_LOG=debug \
+    extra_id_file="{{CONFIG_DIR}}/extra_id.id"
+    extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    # sudo backgrounded can't read TTY; pre-authenticate while still interactive
+    sudo -v
+    sudo RUST_LOG={{CLIENT_LOG_LEVEL}} \
         "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root" \
         -c "{{CONFIG_DIR}}/client.toml" \
-        --hopr-blokli-url "${blokli_url}" &
-    echo $! > /tmp/gnosis-vpn-client.pid
-    echo "Client PID: $(cat /tmp/gnosis-vpn-client.pid)"
+        --hopr-blokli-url "${blokli_url}" \
+        --hopr-identity-file "${extra_id_file}" \
+        --hopr-identity-pass "${extra_id_pass}" \
+        --worker-user "{{CLIENT_WORKER_USER}}" \
+        --worker-binary "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" \
+        --log-file "{{CLIENT_LOG_FILE}}" &
+    echo $! > /tmp/gnosis_vpn-client.pid
+    echo "Client PID: $(cat /tmp/gnosis_vpn-client.pid)"
 
 # Stop gnosis_vpn-client (cascades SIGTERM to the worker via gnosis_vpn-root)
 client-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid_file=/tmp/gnosis-vpn-client.pid
+    pid_file=/tmp/gnosis_vpn-client.pid
     if [ -f "${pid_file}" ]; then
         sudo kill "$(cat "${pid_file}")" 2>/dev/null || true
         rm -f "${pid_file}"
@@ -226,6 +260,39 @@ up: cluster-start cluster-wait server-start gen-config
 # Tear the full stack down
 down: client-stop server-stop cluster-stop
 
-# Tail all cluster node logs
+# Full development setup: cluster + server + config, then prints the client run command.
+# Set CLIENT_WORKER_USER to the OS user the worker runs as (must exist — see README).
+development-setup: cluster-start cluster-wait server-start gen-config
+    #!/usr/bin/env bash
+    set -euo pipefail
+    worker_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
+    id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    log_level="{{CLIENT_LOG_LEVEL}}"
+    config_dir="{{CONFIG_DIR}}"
+    worker_user="{{CLIENT_WORKER_USER}}"
+    # octal \134 = backslash; avoids \\ in the justfile which just 1.43+ rejects
+    bs=$'\134'
+
+    sudo chown "${worker_user}" "${worker_bin}"
+
+    echo ""
+    echo "Stack is up. Run the client with:"
+    echo ""
+    echo "sudo RUST_LOG=\"${log_level}\" ${bs}"
+    echo "     ${root_bin} ${bs}"
+    echo "     -c ${config_dir}/client.toml ${bs}"
+    echo "     --hopr-blokli-url \"${blokli_url}\" ${bs}"
+    echo "     --hopr-identity-file ${config_dir}/extra_id.id ${bs}"
+    echo "     --hopr-identity-pass \"${id_pass}\" ${bs}"
+    echo "     --worker-binary ${worker_bin} ${bs}"
+    echo "     --worker-user ${worker_user} ${bs}"
+    echo "     --allow-insecure ${bs}"
+    echo "     --allow-experimental ${bs}"
+    echo "     --client-autostart 30min"
+    echo ""
+
+# Tail all cluster node logs and client log
 logs:
-    tail -f "{{DATA_DIR}}/logs/"*.log
+    tail -f "{{DATA_DIR}}/logs/"*.log "{{CLIENT_LOG_FILE}}"

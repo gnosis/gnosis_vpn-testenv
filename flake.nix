@@ -25,8 +25,6 @@
           treefmt = {
             projectRootFile = "justfile";
 
-            settings.global.excludes = [ "configs/*.tmpl" ];
-
             programs.nixfmt.enable = true;
 
             programs.deno.enable = true;
@@ -41,9 +39,9 @@
             packages =
               with pkgs;
               [
+                gettext
                 jq
                 wireguard-tools
-                gettext
                 config.treefmt.build.wrapper
               ]
               ++ pkgs.lib.attrValues config.treefmt.build.programs;

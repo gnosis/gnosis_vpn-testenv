@@ -11,6 +11,9 @@ native Gnosis VPN client against them.
   shell to avoid nesting issues)
 - Docker (or Podman / Apple `container`)
 - Sibling repos checked out at the paths below (overridable)
+- A local OS user that `gnosis_vpn-worker` runs as — `gnosis_vpn-root` drops
+  privileges to this user when spawning the worker. Defaults to `gnosisvpn`;
+  override via `CLIENT_WORKER_USER`.
 
 ## Sibling repo paths
 
@@ -34,24 +37,28 @@ GVPN_CLIENT_DIR=/ci/gnosis_vpn-client \
   just up
 ```
 
-## Quick start
+## Development setup
 
 ```sh
 # 1. Build all components (once, or after source changes)
 just build
 
-# 2. Start localcluster + VPN server(s) + generate client config
-just up
+# 2. Start the full stack and get the ready-to-run client command
+just development-setup
 
-# 3. Start the client (needs root for WireGuard)
-just client-start
+# 3. Copy-paste and run the printed sudo command in a second terminal
+#    (WireGuard requires root)
 
-# 4. Tear everything down
+# 4. Tear everything down (stops client, servers, and cluster)
 just down
 ```
 
-`just up` does not include `client-start` — it requires `sudo` and is meant to
-be a deliberate step.
+`just development-setup` starts the localcluster, VPN server(s), generates
+client config, sets the correct ownership on the worker binary, and prints the
+exact `sudo` command to start the client — copy-paste it to run.
+
+`just up` covers steps 2 without the worker chown or client command hint; useful
+for scripting and CI.
 
 ## Running system tests
 
@@ -64,17 +71,18 @@ just down
 
 ## Configuration variables
 
-| Variable          | Default                   | Purpose                              |
-| ----------------- | ------------------------- | ------------------------------------ |
-| `HOPRD_DIR`       | `../hoprd`                | Path to hoprd repo                   |
-| `GVPN_SERVER_DIR` | `../gnosis_vpn-server`    | Path to gnosis_vpn-server repo       |
-| `GVPN_CLIENT_DIR` | `../gnosis_vpn-client`    | Path to gnosis_vpn-client repo       |
-| `CLUSTER_SIZE`    | `3`                       | Number of HOPR nodes in localcluster |
-| `SERVER_COUNT`    | `1`                       | Number of VPN server containers      |
-| `HOPS`            | `1`                       | Session hop count for destinations   |
-| `DATA_DIR`        | `/tmp/hopr-nodes`         | Localcluster data directory          |
-| `CONFIG_DIR`      | `/tmp/gnosis-vpn-testenv` | Generated config output directory    |
-| `CHAIN_IMAGE`     | `…/bloklid-anvil:latest`  | Blokli + Anvil container image       |
+| Variable             | Default                   | Purpose                              |
+| -------------------- | ------------------------- | ------------------------------------ |
+| `HOPRD_DIR`          | `../hoprd`                | Path to hoprd repo                   |
+| `GVPN_SERVER_DIR`    | `../gnosis_vpn-server`    | Path to gnosis_vpn-server repo       |
+| `GVPN_CLIENT_DIR`    | `../gnosis_vpn-client`    | Path to gnosis_vpn-client repo       |
+| `CLUSTER_SIZE`       | `3`                       | Number of HOPR nodes in localcluster |
+| `SERVER_COUNT`       | `1`                       | Number of VPN server containers      |
+| `HOPS`               | `1`                       | Session hop count for destinations   |
+| `CLIENT_WORKER_USER` | `gnosisvpn`               | OS user the worker process runs as   |
+| `DATA_DIR`           | `/tmp/hopr-nodes`         | Localcluster data directory          |
+| `CONFIG_DIR`         | `/tmp/gnosis_vpn-testenv` | Generated config output directory    |
+| `CHAIN_IMAGE`        | `…/bloklid-anvil:latest`  | Blokli + Anvil container image       |
 
 ## Port assignments
 
