@@ -316,8 +316,10 @@ development-setup: metrics-start cluster-start cluster-wait server-start gen-con
     # octal \134 = backslash; avoids \\ in the justfile which just 1.43+ rejects
     bs=$'\134'
 
-    # The Nix store is read-only, so copy the worker to /tmp before chown-ing it
+    # The Nix store is read-only, so copy the worker to /tmp before chown-ing it.
+    # Remove first: a prior run may have chown-ed it to worker_user, blocking cp.
     worker_bin="/tmp/gnosis_vpn-worker"
+    sudo rm -f "${worker_bin}"
     cp "${worker_bin_src}" "${worker_bin}"
     sudo chown "${worker_user}" "${worker_bin}"
 
