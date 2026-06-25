@@ -11,8 +11,8 @@ CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/
 # VPN server settings
 SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 
-# Grafana UI port for the otel-lgtm metrics container (OTLP HTTP always binds 4318)
-METRICS_GRAFANA_PORT := env_var_or_default("METRICS_GRAFANA_PORT", "3100")
+# Data directory for VictoriaMetrics on-disk storage
+METRICS_DATA_DIR := env_var_or_default("METRICS_DATA_DIR", "/tmp/hopr-metrics-data")
 
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
@@ -257,30 +257,46 @@ system-tests:
 
 # ─── Metrics ─────────────────────────────────────────────────────────────────
 
-# Start grafana/otel-lgtm: accepts OTLP on :4318, exposes Grafana on :METRICS_GRAFANA_PORT
+# Start otelcol (OTLP HTTP on 127.0.0.1:4318) and VictoriaMetrics (PromQL UI on :8428)
 metrics-start:
     #!/usr/bin/env bash
     set -euo pipefail
-    name="hopr-metrics"
-    if docker container inspect "${name}" > /dev/null 2>&1; then
-        echo "${name} already exists — skipping start"
-        echo "  Grafana: http://localhost:{{METRICS_GRAFANA_PORT}} (admin/admin)"
+    otelcol_pid=/tmp/hopr-otelcol.pid
+    vm_pid=/tmp/hopr-victoriametrics.pid
+    configs_dir="{{justfile_directory()}}/configs"
+
+    if [ -f "${otelcol_pid}" ] && kill -0 "$(cat "${otelcol_pid}")" 2>/dev/null; then
+        echo "Metrics already running — skipping start"
+        echo "  OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
         exit 0
     fi
-    docker run --rm --detach \
-        --publish "{{METRICS_GRAFANA_PORT}}:3000" \
-        --publish "4318:4318" \
-        --name "${name}" \
-        grafana/otel-lgtm
-    echo "Started ${name} — Grafana: http://localhost:{{METRICS_GRAFANA_PORT}} (admin/admin)"
 
-# Stop the grafana/otel-lgtm metrics container
+    mkdir -p "{{METRICS_DATA_DIR}}"
+
+    otelcol --config "${configs_dir}/otelcol.yaml" > /tmp/hopr-otelcol.log 2>&1 &
+    echo $! > "${otelcol_pid}"
+
+    victoria-metrics \
+        -storageDataPath "{{METRICS_DATA_DIR}}" \
+        -httpListenAddr "127.0.0.1:8428" \
+        > /tmp/hopr-victoriametrics.log 2>&1 &
+    echo $! > "${vm_pid}"
+
+    echo "Started metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+
+# Stop otelcol and VictoriaMetrics
 metrics-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    docker stop hopr-metrics 2>/dev/null \
-        && echo "Stopped hopr-metrics" \
-        || echo "hopr-metrics was not running"
+    for pid_file in /tmp/hopr-otelcol.pid /tmp/hopr-victoriametrics.pid; do
+        if [ -f "${pid_file}" ]; then
+            kill "$(cat "${pid_file}")" 2>/dev/null || true
+            rm -f "${pid_file}"
+        fi
+    done
+    pkill -f "otelcol --config"   2>/dev/null || true
+    pkill -f "victoria-metrics"   2>/dev/null || true
+    echo "Metrics stopped"
 
 # ─── Composite ───────────────────────────────────────────────────────────────
 
@@ -292,8 +308,10 @@ down: client-stop server-stop cluster-stop metrics-stop
 
 # Remove all generated configs, data, PID files, logs, and the chain container
 clean:
-    rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}"
+    rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}" "{{METRICS_DATA_DIR}}"
     rm -f /tmp/hoprd-localcluster.pid /tmp/gnosis_vpn-client.pid "{{CLIENT_LOG_FILE}}"
+    rm -f /tmp/hopr-otelcol.pid /tmp/hopr-victoriametrics.pid
+    rm -f /tmp/hopr-otelcol.log /tmp/hopr-victoriametrics.log
     sudo rm -f /tmp/gnosis_vpn-worker
     docker rm -f hopr-chain 2>/dev/null || true
     echo "Clean done"
@@ -303,7 +321,7 @@ reset: down clean
 
 # Full development setup: cluster + server + config, then prints the client run command.
 # Set CLIENT_WORKER_USER to the OS user the worker runs as (must exist — see README).
-development-setup: metrics-start cluster-start cluster-wait server-start gen-config
+development-setup: cluster-start cluster-wait server-start gen-config
     #!/usr/bin/env bash
     set -euo pipefail
     worker_bin_src="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
@@ -324,7 +342,7 @@ development-setup: metrics-start cluster-start cluster-wait server-start gen-con
     sudo chown "${worker_user}" "${worker_bin}"
 
     echo ""
-    echo "Metrics: http://localhost:{{METRICS_GRAFANA_PORT}} (admin/admin) — explore hoprd_* in the Mimir datasource"
+    echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
     echo ""
     echo "Stack is up. Run the client with:"
     echo ""

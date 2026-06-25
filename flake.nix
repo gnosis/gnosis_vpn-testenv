@@ -41,6 +41,8 @@
               [
                 gettext
                 jq
+                opentelemetry-collector
+                victoriametrics
                 wireguard-tools
                 config.treefmt.build.wrapper
               ]
