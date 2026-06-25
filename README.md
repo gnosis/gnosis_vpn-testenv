@@ -49,7 +49,7 @@ just development-setup
 # 3. Copy-paste and run the printed sudo command in a second terminal
 #    (WireGuard requires root)
 
-# 4. Tear everything down
+# 4. Tear everything down (stops client, servers, and cluster)
 just down
 ```
 
