@@ -12,7 +12,7 @@ CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/
 SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 
 # Grafana UI port for the otel-lgtm metrics container (OTLP HTTP always binds 4318)
-METRICS_GRAFANA_PORT := env_var_or_default("METRICS_GRAFANA_PORT", "3000")
+METRICS_GRAFANA_PORT := env_var_or_default("METRICS_GRAFANA_PORT", "3100")
 
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
