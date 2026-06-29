@@ -18,7 +18,7 @@ METRICS_DATA_DIR := env_var_or_default("METRICS_DATA_DIR", "/tmp/hopr-metrics-da
 HOPS := env_var_or_default("HOPS", "1")
 
 # Log levels for each component (passed as RUST_LOG)
-CLIENT_LOG_LEVEL  := env_var_or_default("CLIENT_LOG_LEVEL",  "info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
+CLIENT_LOG_LEVEL  := env_var_or_default("CLIENT_LOG_LEVEL",  "debug,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
 SERVER_LOG_LEVEL  := env_var_or_default("SERVER_LOG_LEVEL",  "info")
 CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 
