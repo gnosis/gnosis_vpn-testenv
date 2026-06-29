@@ -60,10 +60,12 @@ build: build-cluster build-server build-client
 cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
     pid_file=/tmp/hoprd-localcluster.pid
-    if [ -f "${pid_file}" ] && kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
-        echo "Cluster already running — skipping start"
-        echo "Localcluster PID: $(cat "${pid_file}")"
+    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // empty')
+    if [ -n "${cluster_state}" ]; then
+        pid=$(cat "${pid_file}" 2>/dev/null || echo "unknown")
+        echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
         exit 0
     fi
     rm -rf "{{DATA_DIR}}"
@@ -193,10 +195,9 @@ gen-config:
 client-start:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid_file=/tmp/gnosis_vpn-client.pid
-    if [ -f "${pid_file}" ] && sudo kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
-        echo "Client already running — skipping start"
-        echo "Client PID: $(cat "${pid_file}")"
+    client_pid=$(pgrep -f gnosis_vpn-root 2>/dev/null || true)
+    if [ -n "${client_pid}" ]; then
+        echo "Client found (PID ${client_pid}) — skipping start"
         exit 0
     fi
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
@@ -265,8 +266,9 @@ metrics-start:
     vm_pid=/tmp/hopr-victoriametrics.pid
     configs_dir="{{justfile_directory()}}/configs"
 
-    if [ -f "${otelcol_pid}" ] && kill -0 "$(cat "${otelcol_pid}")" 2>/dev/null; then
-        echo "Metrics already running — skipping start"
+    otelcol_running=$(pgrep -f "otelcol --config" 2>/dev/null || true)
+    if [ -n "${otelcol_running}" ]; then
+        echo "Metrics found (PID ${otelcol_running}) — skipping start"
         echo "  OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
         exit 0
     fi
