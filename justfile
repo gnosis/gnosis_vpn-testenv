@@ -61,10 +61,9 @@ cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
     lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
-    pid_file=/tmp/hoprd-localcluster.pid
     cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // empty')
     if [ -n "${cluster_state}" ]; then
-        pid=$(cat "${pid_file}" 2>/dev/null || echo "unknown")
+        pid=$(pgrep -f hoprd-localcluster | head -1)
         echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
         exit 0
     fi
@@ -76,8 +75,7 @@ cluster-start:
         --size        {{CLUSTER_SIZE}} \
         --data-dir    "{{DATA_DIR}}" \
         --extra-identities 1 &
-    echo $! > /tmp/hoprd-localcluster.pid
-    echo "Localcluster PID: $(cat /tmp/hoprd-localcluster.pid)"
+    echo "Localcluster PID: $!"
 
 # Poll until cluster reaches state=running
 cluster-wait:
@@ -98,11 +96,6 @@ cluster-status:
 cluster-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid_file=/tmp/hoprd-localcluster.pid
-    if [ -f "${pid_file}" ]; then
-        kill "$(cat "${pid_file}")" 2>/dev/null || true
-        rm -f "${pid_file}"
-    fi
     pkill -f hoprd-localcluster 2>/dev/null || true
     pkill -f "result-hoprd/bin/hoprd" 2>/dev/null || true
     docker rm -f hopr-chain 2>/dev/null || true
@@ -214,18 +207,12 @@ client-start:
         --worker-user "{{CLIENT_WORKER_USER}}" \
         --worker-binary "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" \
         --log-file "{{CLIENT_LOG_FILE}}" &
-    echo $! > /tmp/gnosis_vpn-client.pid
-    echo "Client PID: $(cat /tmp/gnosis_vpn-client.pid)"
+    echo "Client PID: $!"
 
 # Stop gnosis_vpn-client (cascades SIGTERM to the worker via gnosis_vpn-root)
 client-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid_file=/tmp/gnosis_vpn-client.pid
-    if [ -f "${pid_file}" ]; then
-        sudo kill "$(cat "${pid_file}")" 2>/dev/null || true
-        rm -f "${pid_file}"
-    fi
     sudo pkill -f gnosis_vpn-root   2>/dev/null || true
     sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
     echo "Client stopped"
@@ -262,8 +249,6 @@ system-tests:
 metrics-start:
     #!/usr/bin/env bash
     set -euo pipefail
-    otelcol_pid=/tmp/hopr-otelcol.pid
-    vm_pid=/tmp/hopr-victoriametrics.pid
     configs_dir="{{justfile_directory()}}/configs"
 
     otelcol_running=$(pgrep -f "otelcol --config" 2>/dev/null || true)
@@ -276,13 +261,10 @@ metrics-start:
     mkdir -p "{{METRICS_DATA_DIR}}"
 
     otelcol --config "${configs_dir}/otelcol.yaml" > /tmp/hopr-otelcol.log 2>&1 &
-    echo $! > "${otelcol_pid}"
-
     victoria-metrics \
         -storageDataPath "{{METRICS_DATA_DIR}}" \
         -httpListenAddr "127.0.0.1:8428" \
         > /tmp/hopr-victoriametrics.log 2>&1 &
-    echo $! > "${vm_pid}"
 
     echo "Started metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
 
@@ -290,14 +272,8 @@ metrics-start:
 metrics-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    for pid_file in /tmp/hopr-otelcol.pid /tmp/hopr-victoriametrics.pid; do
-        if [ -f "${pid_file}" ]; then
-            kill "$(cat "${pid_file}")" 2>/dev/null || true
-            rm -f "${pid_file}"
-        fi
-    done
-    pkill -f "otelcol --config"   2>/dev/null || true
-    pkill -f "victoria-metrics"   2>/dev/null || true
+    pkill -f "otelcol --config" 2>/dev/null || true
+    pkill -f "victoria-metrics" 2>/dev/null || true
     echo "Metrics stopped"
 
 # ─── Composite ───────────────────────────────────────────────────────────────
@@ -308,12 +284,10 @@ up: metrics-start cluster-start cluster-wait server-start gen-config
 # Tear the full stack down
 down: client-stop server-stop cluster-stop metrics-stop
 
-# Remove all generated configs, data, PID files, logs, and the chain container
+# Remove all generated configs, data, logs, and the chain container
 clean:
     rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}" "{{METRICS_DATA_DIR}}"
-    rm -f /tmp/hoprd-localcluster.pid /tmp/gnosis_vpn-client.pid "{{CLIENT_LOG_FILE}}"
-    rm -f /tmp/hopr-otelcol.pid /tmp/hopr-victoriametrics.pid
-    rm -f /tmp/hopr-otelcol.log /tmp/hopr-victoriametrics.log
+    rm -f "{{CLIENT_LOG_FILE}}" /tmp/hopr-otelcol.log /tmp/hopr-victoriametrics.log
     sudo rm -f /tmp/gnosis_vpn-worker
     docker rm -f hopr-chain 2>/dev/null || true
     echo "Clean done"
