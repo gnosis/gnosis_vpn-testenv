@@ -61,8 +61,12 @@ cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
     lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
-    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // empty')
-    if [ -n "${cluster_state}" ]; then
+    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
+    if [ "${cluster_state}" = "failed" ]; then
+        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
+        exit 1
+    fi
+    if [ "${cluster_state}" != "not_running" ]; then
         pid=$(pgrep -f hoprd-localcluster | head -1)
         echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
         exit 0
