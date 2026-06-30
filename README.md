@@ -61,8 +61,7 @@ hint; useful for scripting and CI when components are pre-built.
 ## Running system tests
 
 ```sh
-just build          # if not already built
-just up             # cluster + servers + gen-config
+just up             # build + cluster + servers + metrics + gen-config
 just system-tests   # delegates to gnosis_vpn-client's system-tests with generated artifacts
 just down
 ```
