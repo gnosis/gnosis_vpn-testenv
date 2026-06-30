@@ -49,7 +49,7 @@ build-server:
 
 # Build gnosis_vpn-client binaries
 build-client:
-    nix build -L --out-link {{GVPN_CLIENT_DIR}}/result {{GVPN_CLIENT_DIR}}#binary-gnosis_vpn-x86_64-linux
+    nix build -L --out-link {{GVPN_CLIENT_DIR}}/result-client {{GVPN_CLIENT_DIR}}#binary-gnosis_vpn-x86_64-linux
 
 # Build all components
 build: build-cluster build-server build-client
@@ -203,13 +203,13 @@ client-start:
     # sudo backgrounded can't read TTY; pre-authenticate while still interactive
     sudo -v
     sudo RUST_LOG={{CLIENT_LOG_LEVEL}} \
-        "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root" \
+        "{{GVPN_CLIENT_DIR}}/result-client/bin/gnosis_vpn-root" \
         -c "{{CONFIG_DIR}}/client.toml" \
         --hopr-blokli-url "${blokli_url}" \
         --hopr-identity-file "${extra_id_file}" \
         --hopr-identity-pass "${extra_id_pass}" \
         --worker-user "{{CLIENT_WORKER_USER}}" \
-        --worker-binary "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" \
+        --worker-binary "{{GVPN_CLIENT_DIR}}/result-client/bin/gnosis_vpn-worker" \
         --log-file "{{CLIENT_LOG_FILE}}" &
     echo "Client PID: $!"
 
@@ -234,7 +234,7 @@ system-tests:
         fi
     done
 
-    worker_binary="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    worker_binary="{{GVPN_CLIENT_DIR}}/result-client/bin/gnosis_vpn-worker"
     if [ ! -f "${worker_binary}" ]; then
         echo "Missing ${worker_binary} — run 'just build-client' first" >&2
         exit 1
@@ -288,12 +288,13 @@ up: metrics-start cluster-start cluster-wait server-start gen-config
 # Tear the full stack down
 down: client-stop server-stop cluster-stop metrics-stop
 
-# Remove all generated configs, data, logs, and the chain container
+# Remove all generated configs, data, logs, chain container, and nix build results
 clean:
     rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}" "{{METRICS_DATA_DIR}}"
     rm -f "{{CLIENT_LOG_FILE}}" /tmp/hopr-otelcol.log /tmp/hopr-victoriametrics.log
     sudo rm -f /tmp/gnosis_vpn-worker
     docker rm -f hopr-chain 2>/dev/null || true
+    rm -f "{{HOPRD_DIR}}/result-hoprd" "{{HOPRD_DIR}}/result-localcluster" "{{GVPN_CLIENT_DIR}}/result-client"
     echo "Clean done"
 
 # Tear the full stack down and wipe all state
@@ -304,8 +305,8 @@ reset: down clean
 development-setup: cluster-start cluster-wait server-start gen-config
     #!/usr/bin/env bash
     set -euo pipefail
-    worker_bin_src="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
-    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    worker_bin_src="{{GVPN_CLIENT_DIR}}/result-client/bin/gnosis_vpn-worker"
+    root_bin="{{GVPN_CLIENT_DIR}}/result-client/bin/gnosis_vpn-root"
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
     id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
     log_level="{{CLIENT_LOG_LEVEL}}"
