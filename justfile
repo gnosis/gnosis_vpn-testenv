@@ -85,7 +85,6 @@ cluster-start:
         echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
         exit 0
     fi
-    rm -rf "{{DATA_DIR}}"
     RUST_LOG={{CLUSTER_LOG_LEVEL}} \
         "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
         --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
@@ -131,6 +130,8 @@ cluster-stop:
     pkill -f hoprd-localcluster 2>/dev/null || true
     pkill -f "result-hoprd/bin/hoprd" 2>/dev/null || true
     docker rm -f hopr-chain 2>/dev/null || true
+    # cluster recreates state everytime, so we can safely delete it on stop
+    rm -rf "{{DATA_DIR}}"
     echo "Cluster stopped"
 
 # ─── VPN Servers ─────────────────────────────────────────────────────────────
