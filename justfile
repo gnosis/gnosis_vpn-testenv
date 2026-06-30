@@ -61,6 +61,17 @@ cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
     lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    if [ ! -f "${hoprd_bin}" ]; then
+        echo "Error: hoprd not found at ${hoprd_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
     cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
     if [ "${cluster_state}" = "failed" ]; then
         echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
@@ -86,6 +97,11 @@ cluster-wait:
     #!/usr/bin/env bash
     set -euo pipefail
     lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
     echo "Waiting for cluster..."
     until [ "$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // empty')" = "running" ]; do
         sleep 1
@@ -94,7 +110,15 @@ cluster-wait:
 
 # Print live cluster status as JSON
 cluster-status:
-    "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" status --data-dir "{{DATA_DIR}}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    "${lc_bin}" status --data-dir "{{DATA_DIR}}"
 
 # Stop localcluster
 cluster-stop:
@@ -192,6 +216,13 @@ gen-config:
 client-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    worker_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    if [ ! -f "${root_bin}" ] || [ ! -f "${worker_bin}" ]; then
+        echo "Error: gnosis_vpn-client binaries not found at {{GVPN_CLIENT_DIR}}/result/bin/" >&2
+        echo "Run 'just build-client' to build them first" >&2
+        exit 1
+    fi
     client_pid=$(pgrep -f gnosis_vpn-root 2>/dev/null || true)
     if [ -n "${client_pid}" ]; then
         echo "Client found (PID ${client_pid}) — skipping start"
@@ -203,13 +234,13 @@ client-start:
     # sudo backgrounded can't read TTY; pre-authenticate while still interactive
     sudo -v
     sudo RUST_LOG={{CLIENT_LOG_LEVEL}} \
-        "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root" \
+        "${root_bin}" \
         -c "{{CONFIG_DIR}}/client.toml" \
         --hopr-blokli-url "${blokli_url}" \
         --hopr-identity-file "${extra_id_file}" \
         --hopr-identity-pass "${extra_id_pass}" \
         --worker-user "{{CLIENT_WORKER_USER}}" \
-        --worker-binary "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" \
+        --worker-binary "${worker_bin}" \
         --log-file "{{CLIENT_LOG_FILE}}" &
     echo "Client PID: $!"
 
