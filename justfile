@@ -11,11 +11,29 @@ CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/
 # VPN server settings
 SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 
+# Data directory for VictoriaMetrics on-disk storage
+METRICS_DATA_DIR := env_var_or_default("METRICS_DATA_DIR", "/tmp/hopr-metrics-data")
+
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
 
+# Log levels for each component (passed as RUST_LOG)
+CLIENT_LOG_LEVEL  := env_var_or_default("CLIENT_LOG_LEVEL",  "warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
+SERVER_LOG_LEVEL  := env_var_or_default("SERVER_LOG_LEVEL",  "info")
+CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
+
+# Client log file path
+CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client.log")
+
+# OS user the worker process runs as
+CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpntestenv")
+
+# State-home for the worker (derived from CLIENT_WORKER_USER passwd entry if not set)
+CLIENT_STATE_HOME := env_var_or_default("CLIENT_STATE_HOME", "")
+
 # Generated config output dir
-CONFIG_DIR := env_var_or_default("CONFIG_DIR", "/tmp/gnosis-vpn-testenv")
+CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
+TEMPLATES_DIR := justfile_directory() + "/templates"
 
 # List available recipes
 default:
@@ -45,22 +63,48 @@ build: build-cluster build-server build-client
 cluster-start:
     #!/usr/bin/env bash
     set -euo pipefail
-    rm -rf "{{DATA_DIR}}"
-    RUST_LOG=info \
+    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    if [ ! -f "${hoprd_bin}" ]; then
+        echo "Error: hoprd not found at ${hoprd_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
+    if [ "${cluster_state}" = "failed" ]; then
+        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
+        exit 1
+    fi
+    if [ "${cluster_state}" != "not_running" ]; then
+        pid=$(pgrep -f hoprd-localcluster | head -1)
+        echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
+        exit 0
+    fi
+    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
         "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
         --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
         --chain-image "{{CHAIN_IMAGE}}" \
         --size        {{CLUSTER_SIZE}} \
+        --p2p-host    127.0.0.1 \
         --data-dir    "{{DATA_DIR}}" \
         --extra-identities 1 &
-    echo $! > /tmp/hoprd-localcluster.pid
-    echo "Localcluster PID: $(cat /tmp/hoprd-localcluster.pid)"
+    echo "Localcluster PID: $!"
 
 # Poll until cluster reaches state=running
 cluster-wait:
     #!/usr/bin/env bash
     set -euo pipefail
     lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
     echo "Waiting for cluster..."
     until [ "$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // empty')" = "running" ]; do
         sleep 1
@@ -69,18 +113,25 @@ cluster-wait:
 
 # Print live cluster status as JSON
 cluster-status:
-    "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" status --data-dir "{{DATA_DIR}}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    "${lc_bin}" status --data-dir "{{DATA_DIR}}"
 
 # Stop localcluster
 cluster-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid_file=/tmp/hoprd-localcluster.pid
-    if [ -f "${pid_file}" ]; then
-        kill "$(cat "${pid_file}")" 2>/dev/null || true
-        rm -f "${pid_file}"
-    fi
     pkill -f hoprd-localcluster 2>/dev/null || true
+    pkill -f "result-hoprd/bin/hoprd" 2>/dev/null || true
+    docker rm -f hopr-chain 2>/dev/null || true
+    # cluster recreates state everytime, so we can safely delete it on stop
+    rm -rf "{{DATA_DIR}}"
     echo "Cluster stopped"
 
 # ─── VPN Servers ─────────────────────────────────────────────────────────────
@@ -93,10 +144,15 @@ server-start:
         name="gnosis_vpn-server-${i}"
         wg_port=$((51821 + i))
         api_port=$((8000 + i))
+        if docker container inspect "${name}" > /dev/null 2>&1; then
+            echo "${name} already exists — skipping start"
+            echo "  WireGuard: ${wg_port}/udp, API: ${api_port}"
+            continue
+        fi
         private_key=$(wg genkey)
         docker run --rm --detach \
             --env  "PRIVATE_KEY=${private_key}" \
-            --env  RUST_LOG=info \
+            --env  "RUST_LOG={{SERVER_LOG_LEVEL}}" \
             --publish "${api_port}:8000" \
             --publish "${wg_port}:51820/udp" \
             --cap-add=NET_ADMIN \
@@ -134,21 +190,15 @@ gen-config:
     while IFS= read -r node; do
         id=$(echo "${node}"      | jq -r '.id')
         address=$(echo "${node}" | jq -r '.address')
-        destinations+="[destinations.node-${id}]\n"
-        destinations+="address = \"${address}\"\n"
-        destinations+="meta    = { location = \"localcluster\" }\n"
-        destinations+="path    = { hops = {{HOPS}} }\n\n"
+        block=$(DEST_ID="${id}" DEST_ADDRESS="${address}" DEST_HOPS="{{HOPS}}" \
+            envsubst '$DEST_ID,$DEST_ADDRESS,$DEST_HOPS' \
+            < "{{TEMPLATES_DIR}}/destination.toml.tpl")
+        destinations+="${block}"$'\n'
     done < <(echo "${status}" | jq -c '.nodes[]')
 
-    # server-0 is the static connection target for this client config version
-    bridge_target="127.0.0.1:8000"
-    wg_target="127.0.0.1:51821"
-
     DESTINATIONS="${destinations}" \
-    BRIDGE_TARGET="${bridge_target}" \
-    WG_TARGET="${wg_target}" \
-        envsubst '$DESTINATIONS,$BRIDGE_TARGET,$WG_TARGET' \
-        < "$(dirname "{{justfile()}}")/configs/client.toml.tmpl" \
+        envsubst '$DESTINATIONS' \
+        < "{{TEMPLATES_DIR}}/client.toml.tpl" \
         > "{{CONFIG_DIR}}/client.toml"
 
     echo "${blokli_url}" > "{{CONFIG_DIR}}/blokli_url"
@@ -167,30 +217,83 @@ gen-config:
 
 # ─── Client ──────────────────────────────────────────────────────────────────
 
+# Resolve the worker state-home: CLIENT_STATE_HOME if set, else home dir of CLIENT_WORKER_USER
+_state-home:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{CLIENT_STATE_HOME}}" ]; then
+        echo "{{CLIENT_STATE_HOME}}"
+    else
+        passwd_entry=$(getent passwd "{{CLIENT_WORKER_USER}}" 2>/dev/null || true)
+        if [ -z "${passwd_entry}" ]; then
+            echo "Error: user '{{CLIENT_WORKER_USER}}' not found — set CLIENT_STATE_HOME explicitly" >&2
+            exit 1
+        fi
+        echo "${passwd_entry}" | cut -d: -f6
+    fi
+
 # Start gnosis_vpn-client in the background (requires root for WireGuard)
 client-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    worker_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    if [ ! -f "${root_bin}" ] || [ ! -f "${worker_bin}" ]; then
+        echo "Error: gnosis_vpn-client binaries not found at {{GVPN_CLIENT_DIR}}/result/bin/" >&2
+        echo "Run 'just build-client' to build them first" >&2
+        exit 1
+    fi
+    client_pid=$(pgrep -f gnosis_vpn-root 2>/dev/null || true)
+    if [ -n "${client_pid}" ]; then
+        echo "Client found (PID ${client_pid}) — skipping start"
+        exit 0
+    fi
+    state_home=$(just _state-home)
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
-    sudo RUST_LOG=debug \
-        "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root" \
+    extra_id_file="{{CONFIG_DIR}}/extra_id.id"
+    extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    # sudo backgrounded can't read TTY; pre-authenticate while still interactive
+    sudo -v
+    sudo RUST_LOG={{CLIENT_LOG_LEVEL}} \
+        "${root_bin}" \
         -c "{{CONFIG_DIR}}/client.toml" \
-        --hopr-blokli-url "${blokli_url}" &
-    echo $! > /tmp/gnosis-vpn-client.pid
-    echo "Client PID: $(cat /tmp/gnosis-vpn-client.pid)"
+        --hopr-blokli-url "${blokli_url}" \
+        --hopr-identity-file "${extra_id_file}" \
+        --hopr-identity-pass "${extra_id_pass}" \
+        --state-home "${state_home}" \
+        --worker-user "{{CLIENT_WORKER_USER}}" \
+        --worker-binary "${worker_bin}" \
+        --log-file "{{CLIENT_LOG_FILE}}" &
+    echo "Client PID: $!"
 
 # Stop gnosis_vpn-client (cascades SIGTERM to the worker via gnosis_vpn-root)
 client-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid_file=/tmp/gnosis-vpn-client.pid
-    if [ -f "${pid_file}" ]; then
-        sudo kill "$(cat "${pid_file}")" 2>/dev/null || true
-        rm -f "${pid_file}"
-    fi
     sudo pkill -f gnosis_vpn-root   2>/dev/null || true
     sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
     echo "Client stopped"
+
+# Purge worker state without prompting (used by down; skips gracefully if user not found)
+_purge-state:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state_home=$(just _state-home 2>/dev/null) || { echo "Worker state: user not found — skipping purge"; exit 0; }
+    sudo rm -rf "${state_home}"
+    echo "Purged ${state_home}"
+
+# Remove all persistent worker state (identity keys, cache) from the state-home directory
+purge-state:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state_home=$(just _state-home)
+    read -r -p "Permanently delete '${state_home}'? Type 'yes' to confirm: " answer
+    if [ "${answer}" != "yes" ]; then
+        echo "Aborted"
+        exit 1
+    fi
+    sudo rm -rf "${state_home}"
+    echo "Purged ${state_home}"
 
 # ─── System tests ────────────────────────────────────────────────────────────
 
@@ -218,14 +321,105 @@ system-tests:
     SYSTEM_TEST_WORKER_BINARY="${worker_binary}" \
         just -d "{{GVPN_CLIENT_DIR}}" -f "{{GVPN_CLIENT_DIR}}/justfile" system-tests
 
+# ─── Metrics ─────────────────────────────────────────────────────────────────
+
+# Start otelcol (OTLP HTTP on 127.0.0.1:4318) and VictoriaMetrics (PromQL UI on :8428)
+metrics-start:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    configs_dir="{{justfile_directory()}}/configs"
+
+    otelcol_running=$(pgrep -f "otelcol --config" 2>/dev/null || true)
+    if [ -n "${otelcol_running}" ]; then
+        echo "Metrics found (PID ${otelcol_running}) — skipping start"
+        echo "  OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+        exit 0
+    fi
+
+    mkdir -p "{{METRICS_DATA_DIR}}"
+
+    otelcol --config "${configs_dir}/otelcol.yaml" > /tmp/hopr-otelcol.log 2>&1 &
+    victoria-metrics \
+        -storageDataPath "{{METRICS_DATA_DIR}}" \
+        -httpListenAddr "127.0.0.1:8428" \
+        > /tmp/hopr-victoriametrics.log 2>&1 &
+
+    echo "Started metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+
+# Stop otelcol and VictoriaMetrics
+metrics-stop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pkill -f "otelcol --config" 2>/dev/null || true
+    pkill -f "victoria-metrics" 2>/dev/null || true
+    echo "Metrics stopped"
+
 # ─── Composite ───────────────────────────────────────────────────────────────
 
 # Bring the full stack up; client-start is intentionally separate (needs sudo)
-up: cluster-start cluster-wait server-start gen-config
+up: build metrics-start cluster-start cluster-wait server-start gen-config
 
-# Tear the full stack down
-down: client-stop server-stop cluster-stop
+# Tear the full stack down and purge client state (cluster always restarts with new identities)
+down: client-stop server-stop cluster-stop metrics-stop _purge-state
 
-# Tail all cluster node logs
+# Remove all generated configs, data, logs, chain container, and nix build results
+clean:
+    rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}" "{{METRICS_DATA_DIR}}"
+    sudo rm -f "{{CLIENT_LOG_FILE}}" /tmp/hopr-otelcol.log /tmp/hopr-victoriametrics.log
+    sudo rm -f /tmp/gnosis_vpn-worker
+    docker rm -f hopr-chain 2>/dev/null || true
+    rm -f "{{HOPRD_DIR}}/result-hoprd" "{{HOPRD_DIR}}/result-localcluster" "{{GVPN_CLIENT_DIR}}/result"
+    echo "Clean done"
+
+# Tear the full stack down and wipe all state
+reset: down clean
+
+# Full development setup: cluster + server + config, then prints the client run command.
+# Set CLIENT_WORKER_USER to the OS user the worker runs as (must exist — see README).
+development-setup: build metrics-start cluster-start cluster-wait server-start gen-config
+    #!/usr/bin/env bash
+    set -euo pipefail
+    worker_bin_src="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    state_home=$(just _state-home)
+    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
+    id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    log_level="{{CLIENT_LOG_LEVEL}}"
+    config_dir="{{CONFIG_DIR}}"
+    worker_user="{{CLIENT_WORKER_USER}}"
+    # octal \134 = backslash; avoids \\ in the justfile which just 1.43+ rejects
+    bs=$'\134'
+
+    # The Nix store is read-only, so copy the worker to /tmp before chown-ing it.
+    # Remove first: a prior run may have chown-ed it to worker_user, blocking cp.
+    worker_bin="/tmp/gnosis_vpn-worker"
+    sudo rm -f "${worker_bin}"
+    cp "${worker_bin_src}" "${worker_bin}"
+    sudo chown "${worker_user}" "${worker_bin}"
+
+    echo ""
+    echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+    echo ""
+    echo "Stack is up. Run the client with:"
+    echo ""
+    echo "sudo RUST_LOG=\"${log_level}\" ${bs}"
+    echo "     ${root_bin} ${bs}"
+    echo "     -c ${config_dir}/client.toml ${bs}"
+    echo "     --hopr-blokli-url \"${blokli_url}\" ${bs}"
+    echo "     --hopr-identity-file ${config_dir}/extra_id.id ${bs}"
+    echo "     --hopr-identity-pass \"${id_pass}\" ${bs}"
+    echo "     --state-home ${state_home} ${bs}"
+    echo "     --worker-binary ${worker_bin} ${bs}"
+    echo "     --worker-user ${worker_user} ${bs}"
+    echo "     --allow-insecure ${bs}"
+    echo "     --allow-experimental ${bs}"
+    echo "     --client-autostart 30min"
+    echo ""
+
+# Tail all cluster node logs and client log
 logs:
-    tail -f "{{DATA_DIR}}/logs/"*.log
+    tail -f "{{DATA_DIR}}/logs/"*.log "{{CLIENT_LOG_FILE}}"
+
+# Tail only cluster node logs
+node-logs:
+    tail -f "{{DATA_DIR}}/logs/"hoprd_*.log
