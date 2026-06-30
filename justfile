@@ -277,6 +277,11 @@ purge-state:
     #!/usr/bin/env bash
     set -euo pipefail
     state_home=$(just _state-home)
+    read -r -p "Permanently delete '${state_home}'? Type 'yes' to confirm: " answer
+    if [ "${answer}" != "yes" ]; then
+        echo "Aborted"
+        exit 1
+    fi
     sudo rm -rf "${state_home}"
     echo "Purged ${state_home}"
 
