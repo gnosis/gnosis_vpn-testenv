@@ -91,6 +91,7 @@ cluster-start:
         --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
         --chain-image "{{CHAIN_IMAGE}}" \
         --size        {{CLUSTER_SIZE}} \
+        --p2p-host    127.0.0.1 \
         --data-dir    "{{DATA_DIR}}" \
         --extra-identities 1 &
     echo "Localcluster PID: $!"
