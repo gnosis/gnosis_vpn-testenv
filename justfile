@@ -291,7 +291,7 @@ down: client-stop server-stop cluster-stop metrics-stop
 # Remove all generated configs, data, logs, chain container, and nix build results
 clean:
     rm -rf "{{CONFIG_DIR}}" "{{DATA_DIR}}" "{{METRICS_DATA_DIR}}"
-    rm -f "{{CLIENT_LOG_FILE}}" /tmp/hopr-otelcol.log /tmp/hopr-victoriametrics.log
+    sudo rm -f "{{CLIENT_LOG_FILE}}" /tmp/hopr-otelcol.log /tmp/hopr-victoriametrics.log
     sudo rm -f /tmp/gnosis_vpn-worker
     docker rm -f hopr-chain 2>/dev/null || true
     rm -f "{{HOPRD_DIR}}/result-hoprd" "{{HOPRD_DIR}}/result-localcluster" "{{GVPN_CLIENT_DIR}}/result"
