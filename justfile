@@ -28,6 +28,9 @@ CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client
 # OS user the worker process runs as
 CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpn")
 
+# State-home for the worker (derived from CLIENT_WORKER_USER passwd entry if not set)
+CLIENT_STATE_HOME := env_var_or_default("CLIENT_STATE_HOME", "")
+
 # Generated config output dir
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
@@ -212,6 +215,21 @@ gen-config:
 
 # ─── Client ──────────────────────────────────────────────────────────────────
 
+# Resolve the worker state-home: CLIENT_STATE_HOME if set, else home dir of CLIENT_WORKER_USER
+_state-home:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{CLIENT_STATE_HOME}}" ]; then
+        echo "{{CLIENT_STATE_HOME}}"
+    else
+        state_home=$(getent passwd "{{CLIENT_WORKER_USER}}" | cut -d: -f6)
+        if [ -z "${state_home}" ]; then
+            echo "Error: user '{{CLIENT_WORKER_USER}}' not found — set CLIENT_STATE_HOME explicitly" >&2
+            exit 1
+        fi
+        echo "${state_home}"
+    fi
+
 # Start gnosis_vpn-client in the background (requires root for WireGuard)
 client-start:
     #!/usr/bin/env bash
@@ -228,6 +246,7 @@ client-start:
         echo "Client found (PID ${client_pid}) — skipping start"
         exit 0
     fi
+    state_home=$(just _state-home)
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
     extra_id_file="{{CONFIG_DIR}}/extra_id.id"
     extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
@@ -239,6 +258,7 @@ client-start:
         --hopr-blokli-url "${blokli_url}" \
         --hopr-identity-file "${extra_id_file}" \
         --hopr-identity-pass "${extra_id_pass}" \
+        --state-home "${state_home}" \
         --worker-user "{{CLIENT_WORKER_USER}}" \
         --worker-binary "${worker_bin}" \
         --log-file "{{CLIENT_LOG_FILE}}" &
@@ -251,6 +271,14 @@ client-stop:
     sudo pkill -f gnosis_vpn-root   2>/dev/null || true
     sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
     echo "Client stopped"
+
+# Remove all persistent worker state (identity keys, cache) from the state-home directory
+purge-state:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state_home=$(just _state-home)
+    sudo rm -rf "${state_home}"
+    echo "Purged ${state_home}"
 
 # ─── System tests ────────────────────────────────────────────────────────────
 
@@ -314,7 +342,7 @@ metrics-stop:
 # ─── Composite ───────────────────────────────────────────────────────────────
 
 # Bring the full stack up; client-start is intentionally separate (needs sudo)
-up: metrics-start cluster-start cluster-wait server-start gen-config
+up: build metrics-start cluster-start cluster-wait server-start gen-config
 
 # Tear the full stack down
 down: client-stop server-stop cluster-stop metrics-stop
@@ -333,11 +361,12 @@ reset: down clean
 
 # Full development setup: cluster + server + config, then prints the client run command.
 # Set CLIENT_WORKER_USER to the OS user the worker runs as (must exist — see README).
-development-setup: cluster-start cluster-wait server-start gen-config
+development-setup: build metrics-start cluster-start cluster-wait server-start gen-config
     #!/usr/bin/env bash
     set -euo pipefail
     worker_bin_src="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
     root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    state_home=$(just _state-home)
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
     id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
     log_level="{{CLIENT_LOG_LEVEL}}"
@@ -364,6 +393,7 @@ development-setup: cluster-start cluster-wait server-start gen-config
     echo "     --hopr-blokli-url \"${blokli_url}\" ${bs}"
     echo "     --hopr-identity-file ${config_dir}/extra_id.id ${bs}"
     echo "     --hopr-identity-pass \"${id_pass}\" ${bs}"
+    echo "     --state-home ${state_home} ${bs}"
     echo "     --worker-binary ${worker_bin} ${bs}"
     echo "     --worker-user ${worker_user} ${bs}"
     echo "     --allow-insecure ${bs}"
