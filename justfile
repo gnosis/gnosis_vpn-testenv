@@ -409,3 +409,7 @@ development-setup: build metrics-start cluster-start cluster-wait server-start g
 # Tail all cluster node logs and client log
 logs:
     tail -f "{{DATA_DIR}}/logs/"*.log "{{CLIENT_LOG_FILE}}"
+
+# Tail only cluster node logs
+node-logs:
+    tail -f "{{DATA_DIR}}/logs/"hoprd_*.log
