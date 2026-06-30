@@ -80,9 +80,38 @@ just down
 | `SERVER_COUNT`       | `1`                       | Number of VPN server containers      |
 | `HOPS`               | `1`                       | Session hop count for destinations   |
 | `CLIENT_WORKER_USER` | `gnosisvpn`               | OS user the worker process runs as   |
+| `CLIENT_STATE_HOME`  | _(derived)_               | Worker state directory (see below)   |
 | `DATA_DIR`           | `/tmp/hopr-nodes`         | Localcluster data directory          |
 | `CONFIG_DIR`         | `/tmp/gnosis_vpn-testenv` | Generated config output directory    |
 | `CHAIN_IMAGE`        | `…/bloklid-anvil:latest`  | Blokli + Anvil container image       |
+
+## Worker state directory
+
+The worker stores persistent state (identity keys, cache) under a *state-home*
+directory. The `_state-home` recipe resolves its path in two steps:
+
+1. If `CLIENT_STATE_HOME` is set, that value is used as-is.
+2. Otherwise the home directory of `CLIENT_WORKER_USER` is looked up via
+   `getent passwd`. If the user does not exist the recipe fails with an
+   actionable error message.
+
+Set `CLIENT_STATE_HOME` explicitly whenever `CLIENT_WORKER_USER` is not a real
+OS user (e.g. in CI, or when running rootless with a different layout):
+
+```sh
+CLIENT_STATE_HOME=/var/lib/gnosis_vpn just client-start
+```
+
+### Purging state
+
+```sh
+just purge-state
+```
+
+Deletes the entire state-home directory (requires `sudo`). The recipe resolves
+the path the same way as `_state-home` and asks for a `yes` confirmation before
+deleting. Use this to start with a clean identity after a failed run or when
+rotating keys.
 
 ## Port assignments
 
