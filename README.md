@@ -40,25 +40,23 @@ GVPN_CLIENT_DIR=/ci/gnosis_vpn-client \
 ## Development setup
 
 ```sh
-# 1. Build all components (once, or after source changes)
-just build
-
-# 2. Start the full stack and get the ready-to-run client command
+# 1. Build all components, start the full stack, and get the ready-to-run client command
 just development-setup
 
-# 3. Copy-paste and run the printed sudo command in a second terminal
+# 2. Copy-paste and run the printed sudo command in a second terminal
 #    (WireGuard requires root)
 
-# 4. Tear everything down (stops client, servers, and cluster)
+# 3. Tear everything down (stops client, servers, cluster, and metrics)
 just down
 ```
 
-`just development-setup` starts the localcluster, VPN server(s), generates
-client config, sets the correct ownership on the worker binary, and prints the
-exact `sudo` command to start the client — copy-paste it to run.
+`just development-setup` builds all components, starts the localcluster, VPN
+server(s), and metrics stack, generates client config, sets the correct
+ownership on the worker binary, and prints the exact `sudo` command to start
+the client — copy-paste it to run.
 
-`just up` covers steps 2 without the worker chown or client command hint; useful
-for scripting and CI.
+`just up` does the same minus the build and the worker chown/client command
+hint; useful for scripting and CI when components are pre-built.
 
 ## Running system tests
 
