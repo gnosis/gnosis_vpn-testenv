@@ -26,7 +26,7 @@ CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client.log")
 
 # OS user the worker process runs as
-CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpn")
+CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpntestenv")
 
 # State-home for the worker (derived from CLIENT_WORKER_USER passwd entry if not set)
 CLIENT_STATE_HOME := env_var_or_default("CLIENT_STATE_HOME", "")
@@ -274,6 +274,14 @@ client-stop:
     sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
     echo "Client stopped"
 
+# Purge worker state without prompting (used by down; skips gracefully if user not found)
+_purge-state:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state_home=$(just _state-home 2>/dev/null) || { echo "Worker state: user not found — skipping purge"; exit 0; }
+    sudo rm -rf "${state_home}"
+    echo "Purged ${state_home}"
+
 # Remove all persistent worker state (identity keys, cache) from the state-home directory
 purge-state:
     #!/usr/bin/env bash
@@ -351,8 +359,8 @@ metrics-stop:
 # Bring the full stack up; client-start is intentionally separate (needs sudo)
 up: build metrics-start cluster-start cluster-wait server-start gen-config
 
-# Tear the full stack down
-down: client-stop server-stop cluster-stop metrics-stop
+# Tear the full stack down and purge client state (cluster always restarts with new identities)
+down: client-stop server-stop cluster-stop metrics-stop _purge-state
 
 # Remove all generated configs, data, logs, chain container, and nix build results
 clean:
