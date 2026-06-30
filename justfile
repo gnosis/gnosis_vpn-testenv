@@ -222,12 +222,12 @@ _state-home:
     if [ -n "{{CLIENT_STATE_HOME}}" ]; then
         echo "{{CLIENT_STATE_HOME}}"
     else
-        state_home=$(getent passwd "{{CLIENT_WORKER_USER}}" | cut -d: -f6)
-        if [ -z "${state_home}" ]; then
+        passwd_entry=$(getent passwd "{{CLIENT_WORKER_USER}}" 2>/dev/null || true)
+        if [ -z "${passwd_entry}" ]; then
             echo "Error: user '{{CLIENT_WORKER_USER}}' not found — set CLIENT_STATE_HOME explicitly" >&2
             exit 1
         fi
-        echo "${state_home}"
+        echo "${passwd_entry}" | cut -d: -f6
     fi
 
 # Start gnosis_vpn-client in the background (requires root for WireGuard)
