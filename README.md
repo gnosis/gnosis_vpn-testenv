@@ -12,8 +12,8 @@ native Gnosis VPN client against them.
 - Docker (or Podman / Apple `container`)
 - Sibling repos checked out at the paths below (overridable)
 - A local OS user that `gnosis_vpn-worker` runs as — `gnosis_vpn-root` drops
-  privileges to this user when spawning the worker. Defaults to `gnosisvpntestenv`;
-  override via `CLIENT_WORKER_USER`.
+  privileges to this user when spawning the worker. Defaults to
+  `gnosisvpntestenv`; override via `CLIENT_WORKER_USER`.
 
 ## Sibling repo paths
 
@@ -52,8 +52,8 @@ just down
 
 `just development-setup` builds all components, starts the localcluster, VPN
 server(s), and metrics stack, generates client config, sets the correct
-ownership on the worker binary, and prints the exact `sudo` command to start
-the client — copy-paste it to run.
+ownership on the worker binary, and prints the exact `sudo` command to start the
+client — copy-paste it to run.
 
 `just up` does the same minus the build and the worker chown/client command
 hint; useful for scripting and CI when components are pre-built.
@@ -68,28 +68,28 @@ just down
 
 ## Configuration variables
 
-| Variable             | Default                                            | Purpose                              |
-| -------------------- | -------------------------------------------------- | ------------------------------------ |
-| `HOPRD_DIR`          | `../hoprd`                                         | Path to hoprd repo                   |
-| `GVPN_SERVER_DIR`    | `../gnosis_vpn-server`                             | Path to gnosis_vpn-server repo       |
-| `GVPN_CLIENT_DIR`    | `../gnosis_vpn-client`                             | Path to gnosis_vpn-client repo       |
-| `CLUSTER_SIZE`       | `3`                                                | Number of HOPR nodes in localcluster |
-| `SERVER_COUNT`       | `1`                                                | Number of VPN server containers      |
-| `HOPS`               | `1`                                                | Session hop count for destinations   |
-| `CLIENT_WORKER_USER` | `gnosisvpntestenv`                                 | OS user the worker process runs as   |
-| `CLIENT_STATE_HOME`  | _(derived)_                                        | Worker state directory (see below)   |
-| `CLIENT_LOG_LEVEL`   | `warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the client |
-| `CLIENT_LOG_FILE`    | `/tmp/gnosis_vpn-client.log`                       | Client log output path               |
-| `SERVER_LOG_LEVEL`   | `info`                                             | RUST_LOG for VPN server containers   |
-| `CLUSTER_LOG_LEVEL`  | `info`                                             | RUST_LOG for the localcluster        |
-| `DATA_DIR`           | `/tmp/hopr-nodes`                                  | Localcluster data directory          |
-| `METRICS_DATA_DIR`   | `/tmp/hopr-metrics-data`                           | VictoriaMetrics on-disk storage      |
-| `CONFIG_DIR`         | `/tmp/gnosis_vpn-testenv`                          | Generated config output directory    |
-| `CHAIN_IMAGE`        | `…/bloklid-anvil:latest`                           | Blokli + Anvil container image       |
+| Variable             | Default                                                                   | Purpose                              |
+| -------------------- | ------------------------------------------------------------------------- | ------------------------------------ |
+| `HOPRD_DIR`          | `../hoprd`                                                                | Path to hoprd repo                   |
+| `GVPN_SERVER_DIR`    | `../gnosis_vpn-server`                                                    | Path to gnosis_vpn-server repo       |
+| `GVPN_CLIENT_DIR`    | `../gnosis_vpn-client`                                                    | Path to gnosis_vpn-client repo       |
+| `CLUSTER_SIZE`       | `3`                                                                       | Number of HOPR nodes in localcluster |
+| `SERVER_COUNT`       | `1`                                                                       | Number of VPN server containers      |
+| `HOPS`               | `1`                                                                       | Session hop count for destinations   |
+| `CLIENT_WORKER_USER` | `gnosisvpntestenv`                                                        | OS user the worker process runs as   |
+| `CLIENT_STATE_HOME`  | _(derived)_                                                               | Worker state directory (see below)   |
+| `CLIENT_LOG_LEVEL`   | `warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the client              |
+| `CLIENT_LOG_FILE`    | `/tmp/gnosis_vpn-client.log`                                              | Client log output path               |
+| `SERVER_LOG_LEVEL`   | `info`                                                                    | RUST_LOG for VPN server containers   |
+| `CLUSTER_LOG_LEVEL`  | `info`                                                                    | RUST_LOG for the localcluster        |
+| `DATA_DIR`           | `/tmp/hopr-nodes`                                                         | Localcluster data directory          |
+| `METRICS_DATA_DIR`   | `/tmp/hopr-metrics-data`                                                  | VictoriaMetrics on-disk storage      |
+| `CONFIG_DIR`         | `/tmp/gnosis_vpn-testenv`                                                 | Generated config output directory    |
+| `CHAIN_IMAGE`        | `…/bloklid-anvil:latest`                                                  | Blokli + Anvil container image       |
 
 ## Worker state directory
 
-The worker stores persistent state (identity keys, cache) under a *state-home*
+The worker stores persistent state (identity keys, cache) under a _state-home_
 directory. The `_state-home` recipe resolves its path in two steps:
 
 1. If `CLIENT_STATE_HOME` is set, that value is used as-is.
@@ -119,12 +119,14 @@ rotating keys.
 
 `just up` (and `just development-setup`) also starts a local metrics pipeline:
 
-- **otelcol** — receives OTLP/HTTP on `127.0.0.1:4318` and forwards to VictoriaMetrics
-- **VictoriaMetrics** — stores metrics and exposes a PromQL UI at `http://localhost:8428`
+- **otelcol** — receives OTLP/HTTP on `127.0.0.1:4318` and forwards to
+  VictoriaMetrics
+- **VictoriaMetrics** — stores metrics and exposes a PromQL UI at
+  `http://localhost:8428`
 
-The client and server emit OpenTelemetry metrics to `127.0.0.1:4318` automatically when
-the stack is up. Data is persisted under `METRICS_DATA_DIR` between runs; `just down`
-stops both services but does not delete the data.
+The client and server emit OpenTelemetry metrics to `127.0.0.1:4318`
+automatically when the stack is up. Data is persisted under `METRICS_DATA_DIR`
+between runs; `just down` stops both services but does not delete the data.
 
 ```sh
 # Start/stop independently if needed
@@ -146,12 +148,12 @@ just metrics-stop
 
 ## Utility recipes
 
-| Recipe       | What it does                                                         |
-| ------------ | -------------------------------------------------------------------- |
-| `clean`      | Removes all generated configs, data dirs, log files, and Nix results |
-| `reset`      | `down` followed by `clean` — full wipe                              |
-| `logs`       | `tail -f` all cluster node logs and the client log                  |
-| `node-logs`  | `tail -f` only the hoprd node logs                                  |
+| Recipe      | What it does                                                         |
+| ----------- | -------------------------------------------------------------------- |
+| `clean`     | Removes all generated configs, data dirs, log files, and Nix results |
+| `reset`     | `down` followed by `clean` — full wipe                               |
+| `logs`      | `tail -f` all cluster node logs and the client log                   |
+| `node-logs` | `tail -f` only the hoprd node logs                                   |
 
 ## Notes
 
