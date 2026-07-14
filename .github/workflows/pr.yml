@@ -1,0 +1,26 @@
+name: PR
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+concurrency:
+  group: ${{ github.ref }}-pr
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  checks:
+    name: Checks
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
+    uses: hoprnet/hopr-workflows/.github/workflows/checks.yaml@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # workflow-checks-v2.1.0
+    with:
+      source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+      pre_commit: false
+      lint: false
+      deps: false
+      audit: false
+    secrets:
+      cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
