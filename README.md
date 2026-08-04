@@ -1,8 +1,8 @@
 # Gnosis VPN test environment
 
 Local development and system-test stack for Gnosis VPN. Orchestrates a HOPR
-localcluster, one or more containerised Gnosis VPN server instances, and a
-native Gnosis VPN client against them.
+localcluster, one or more containerised Gnosis VPN server (exit node)
+instances, and a containerised Gnosis VPN client against them.
 
 ## Prerequisites
 
@@ -11,9 +11,22 @@ native Gnosis VPN client against them.
   shell to avoid nesting issues)
 - Docker (or Podman / Apple `container`)
 - Sibling repos checked out at the paths below (overridable)
-- A local OS user that `gnosis_vpn-worker` runs as — `gnosis_vpn-root` drops
-  privileges to this user when spawning the worker. Defaults to
-  `gnosisvpntestenv`; override via `CLIENT_WORKER_USER`.
+
+## Why the client runs in its own container
+
+The client and the exit-node servers used to run on the same host network. The
+client's full-tunnel WireGuard route (`0.0.0.0/1` + `128.0.0.0/1` via `wg0`) is
+installed into the *main routing table*, so once it was up, it captured every
+outbound packet on that host — including the exit-node container's own
+Docker-NATed egress to the real internet. That packet would get pulled back
+into the tunnel instead of leaving, producing a routing loop rather than
+internet access.
+
+Running the client in its own container fixes this architecturally: its
+full-tunnel route now lives only in the client container's own network
+namespace, so it can no longer capture the exit-node container's (or the
+host's) traffic. The localcluster still runs natively on the host; the client
+container reaches it over a dedicated Docker network (see below).
 
 ## Sibling repo paths
 
@@ -40,23 +53,23 @@ GVPN_CLIENT_DIR=/ci/gnosis_vpn-client \
 ## Development setup
 
 ```sh
-# 1. Build all components, start the full stack, and get the ready-to-run client command
+# 1. Build all components and start the full stack, including the client container
 just development-setup
 
-# 2. Copy-paste and run the printed sudo command in a second terminal
-#    (WireGuard requires root)
+# 2. Tail the client container's logs
+docker logs -f gnosis_vpn-client
 
 # 3. Tear everything down (stops client, servers, cluster, and metrics)
 just down
 ```
 
-`just development-setup` builds all components, starts the localcluster, VPN
-server(s), and metrics stack, generates client config, sets the correct
-ownership on the worker binary, and prints the exact `sudo` command to start the
-client — copy-paste it to run.
+`just development-setup` builds all components, then brings the whole stack up
+(localcluster, VPN server(s), metrics, generated config, and the client
+container) — no `sudo` needed anywhere; the client container gets its
+WireGuard/routing privileges from `--cap-add=NET_ADMIN` instead of host root.
 
-`just up` does the same minus the build and the worker chown/client command
-hint; useful for scripting and CI when components are pre-built.
+`just up` does the same without the build step; useful for scripting and CI
+when components are pre-built.
 
 ## Running system tests
 
@@ -68,41 +81,32 @@ just down
 
 ## Configuration variables
 
-| Variable             | Default                                                                   | Purpose                              |
-| -------------------- | ------------------------------------------------------------------------- | ------------------------------------ |
-| `HOPRD_DIR`          | `../hoprd`                                                                | Path to hoprd repo                   |
-| `GVPN_SERVER_DIR`    | `../gnosis_vpn-server`                                                    | Path to gnosis_vpn-server repo       |
-| `GVPN_CLIENT_DIR`    | `../gnosis_vpn-client`                                                    | Path to gnosis_vpn-client repo       |
-| `CLUSTER_SIZE`       | `3`                                                                       | Number of HOPR nodes in localcluster |
-| `SERVER_COUNT`       | `1`                                                                       | Number of VPN server containers      |
-| `HOPS`               | `1`                                                                       | Session hop count for destinations   |
-| `CLIENT_WORKER_USER` | `gnosisvpntestenv`                                                        | OS user the worker process runs as   |
-| `CLIENT_STATE_HOME`  | _(derived)_                                                               | Worker state directory (see below)   |
-| `CLIENT_LOG_LEVEL`   | `warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the client              |
-| `CLIENT_LOG_FILE`    | `/tmp/gnosis_vpn-client.log`                                              | Client log output path               |
-| `SERVER_LOG_LEVEL`   | `info`                                                                    | RUST_LOG for VPN server containers   |
-| `CLUSTER_LOG_LEVEL`  | `info`                                                                    | RUST_LOG for the localcluster        |
-| `DATA_DIR`           | `/tmp/hopr-nodes`                                                         | Localcluster data directory          |
-| `METRICS_DATA_DIR`   | `/tmp/hopr-metrics-data`                                                  | VictoriaMetrics on-disk storage      |
-| `CONFIG_DIR`         | `/tmp/gnosis_vpn-testenv`                                                 | Generated config output directory    |
-| `CHAIN_IMAGE`        | `…/bloklid-anvil:latest`                                                  | Blokli + Anvil container image       |
+| Variable                 | Default                                                                   | Purpose                                        |
+| ------------------------ | -------------------------------------------------------------------------- | ---------------------------------------------- |
+| `HOPRD_DIR`              | `../hoprd`                                                                | Path to hoprd repo                             |
+| `GVPN_SERVER_DIR`        | `../gnosis_vpn-server`                                                    | Path to gnosis_vpn-server repo                 |
+| `GVPN_CLIENT_DIR`        | `../gnosis_vpn-client`                                                    | Path to gnosis_vpn-client repo                 |
+| `CLUSTER_SIZE`           | `3`                                                                       | Number of HOPR nodes in localcluster           |
+| `SERVER_COUNT`           | `1`                                                                       | Number of VPN server containers                |
+| `HOPS`                   | `1`                                                                       | Session hop count for destinations             |
+| `DOCKER_NETWORK`         | `gnosis-vpn-testenv`                                                      | Docker network joining client to localcluster  |
+| `DOCKER_NETWORK_SUBNET`  | `172.30.0.0/24`                                                           | Subnet for `DOCKER_NETWORK`                    |
+| `DOCKER_NETWORK_GATEWAY` | `172.30.0.1`                                                              | Gateway IP — also the cluster's P2P bind host  |
+| `CLIENT_STATE_DIR`       | `/tmp/gnosis_vpn-testenv-state`                                           | Persistent worker state (identity keys, cache) |
+| `CLIENT_LOG_LEVEL`       | `warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the client                        |
+| `SERVER_LOG_LEVEL`       | `info`                                                                    | RUST_LOG for VPN server containers             |
+| `CLUSTER_LOG_LEVEL`      | `info`                                                                    | RUST_LOG for the localcluster                  |
+| `DATA_DIR`               | `/tmp/hopr-nodes`                                                         | Localcluster data directory                    |
+| `METRICS_DATA_DIR`       | `/tmp/hopr-metrics-data`                                                  | VictoriaMetrics on-disk storage                |
+| `CONFIG_DIR`             | `/tmp/gnosis_vpn-testenv`                                                 | Generated config output directory              |
+| `CHAIN_IMAGE`            | `…/bloklid-anvil:latest`                                                  | Blokli + Anvil container image                 |
 
-## Worker state directory
+## Client state directory
 
-The worker stores persistent state (identity keys, cache) under a _state-home_
-directory. The `_state-home` recipe resolves its path in two steps:
-
-1. If `CLIENT_STATE_HOME` is set, that value is used as-is.
-2. Otherwise the home directory of `CLIENT_WORKER_USER` is looked up via
-   `getent passwd`. If the user does not exist the recipe fails with an
-   actionable error message.
-
-Set `CLIENT_STATE_HOME` explicitly whenever `CLIENT_WORKER_USER` is not a real
-OS user (e.g. in CI, or when running rootless with a different layout):
-
-```sh
-CLIENT_STATE_HOME=/var/lib/gnosis_vpn just client-start
-```
+The client container stores persistent state (identity keys, cache) under
+`CLIENT_STATE_DIR`, bind-mounted into the container at `/var/lib/gnosisvpn`.
+The container's entrypoint `chown`s it to the worker's internal user on
+startup, so removing it later needs `sudo` (see below).
 
 ### Purging state
 
@@ -110,10 +114,8 @@ CLIENT_STATE_HOME=/var/lib/gnosis_vpn just client-start
 just purge-state
 ```
 
-Deletes the entire state-home directory (requires `sudo`). The recipe resolves
-the path the same way as `_state-home` and asks for a `yes` confirmation before
-deleting. Use this to start with a clean identity after a failed run or when
-rotating keys.
+Deletes `CLIENT_STATE_DIR` after asking for a `yes` confirmation. Use this to
+start with a clean identity after a failed run or when rotating keys.
 
 ## Metrics stack
 
@@ -136,6 +138,10 @@ just metrics-stop
 
 ## Port assignments
 
+The client container publishes no ports — it only needs egress (to the
+localcluster via `DOCKER_NETWORK_GATEWAY`, and to the exit node's WireGuard
+tunnel via the HOPR mixnet, both outbound).
+
 | Service                | Protocol | Host port   |
 | ---------------------- | -------- | ----------- |
 | HOPR node i            | TCP      | `3000 + i`  |
@@ -148,12 +154,14 @@ just metrics-stop
 
 ## Utility recipes
 
-| Recipe      | What it does                                                         |
-| ----------- | -------------------------------------------------------------------- |
-| `clean`     | Removes all generated configs, data dirs, log files, and Nix results |
-| `reset`     | `down` followed by `clean` — full wipe                               |
-| `logs`      | `tail -f` all cluster node logs and the client log                   |
-| `node-logs` | `tail -f` only the hoprd node logs                                   |
+| Recipe           | What it does                                                                |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `clean`          | Removes all generated configs, data dirs, log files, and Nix results       |
+| `reset`          | `down` followed by `clean` — full wipe                                     |
+| `logs`           | `tail -f` cluster node logs and `docker logs -f` the client container      |
+| `node-logs`      | `tail -f` only the hoprd node logs                                         |
+| `network-create` | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`) |
+| `network-remove` | Removes `DOCKER_NETWORK` (runs as part of `clean`)                         |
 
 ## Notes
 
@@ -165,6 +173,12 @@ just metrics-stop
   is a planned client feature.
 - `just gen-config` is idempotent against a running cluster and can be re-run to
   refresh configs without restarting anything.
-- The Nix store is read-only, so `development-setup` copies the worker binary to
-  `/tmp/gnosis_vpn-worker` and `chown`s it to `CLIENT_WORKER_USER` before
-  printing the run command.
+- The localcluster's P2P host/announce address is `DOCKER_NETWORK_GATEWAY`, not
+  `127.0.0.1` — `hoprd-localcluster --p2p-host` uses the same value for both the
+  bind address and the on-chain announced multiaddr, so it must be a real,
+  reachable IP (not `0.0.0.0`/`auto`). Since that gateway IP is a real interface
+  on the host, native processes (e.g. `system-tests`) reach it exactly as they
+  reached `127.0.0.1` before; containers on `DOCKER_NETWORK` reach it too.
+- Exit-node (`gnosis_vpn-server`) containers are unaffected by this change and
+  don't join `DOCKER_NETWORK` — the cluster already reaches their published
+  host ports directly, as before.
