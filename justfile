@@ -82,19 +82,25 @@ network-remove:
 firewall-allow-p2p:
     #!/usr/bin/env bash
     set -uo pipefail
+    mkdir -p "{{CONFIG_DIR}}"
+    status_file="{{CONFIG_DIR}}/firewall-status"
     # DOCKER_NETWORK_GATEWAY is a real host interface, so traffic to it (unlike 127.0.0.1)
     # hits the host's INPUT chain — NixOS's default-deny nixos-fw silently drops it otherwise.
+    # Outcome is recorded to status_file so `just summary` can report it without re-prompting sudo.
     if ! sudo iptables -L nixos-fw -n > /dev/null 2>&1; then
         echo "firewall-allow-p2p: no nixos-fw chain found (not a NixOS host, or firewall disabled) — skipping"
+        echo "disabled: no nixos-fw chain (not NixOS, firewall off, or no sudo access)" > "${status_file}"
         exit 0
     fi
     if ! docker network inspect "{{DOCKER_NETWORK}}" > /dev/null 2>&1; then
         echo "firewall-allow-p2p: Docker network {{DOCKER_NETWORK}} not found — skipping"
+        echo "unknown: Docker network {{DOCKER_NETWORK}} not found" > "${status_file}"
         exit 0
     fi
     network_id=$(docker network inspect "{{DOCKER_NETWORK}}" | jq -r '.[0].Id')
     if [ -z "${network_id}" ]; then
         echo "firewall-allow-p2p: warning: could not resolve {{DOCKER_NETWORK}}'s bridge interface — skipping"
+        echo "unknown: could not resolve bridge interface" > "${status_file}"
         exit 0
     fi
     bridge_if="br-${network_id:0:12}"
@@ -102,10 +108,13 @@ firewall-allow-p2p:
     port_hi=$((9000 + {{CLUSTER_SIZE}} - 1))
     if sudo iptables -C nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT 2>/dev/null; then
         echo "Host firewall already allows UDP ${port_lo}-${port_hi} from ${bridge_if}"
+        echo "enabled: UDP ${port_lo}-${port_hi} allowed from ${bridge_if}" > "${status_file}"
     elif sudo iptables -I nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT; then
         echo "Opened UDP ${port_lo}-${port_hi} from ${bridge_if} in host firewall (nixos-fw)"
+        echo "enabled: UDP ${port_lo}-${port_hi} allowed from ${bridge_if}" > "${status_file}"
     else
         echo "firewall-allow-p2p: warning: failed to insert firewall rule — continuing without it"
+        echo "disabled: failed to insert rule for ${bridge_if}" > "${status_file}"
     fi
 
 # Best-effort: remove the firewall-allow-p2p rule (run before the network itself is removed); warns rather than fails
@@ -403,6 +412,58 @@ metrics-stop:
 
 # Bring the full stack up, including the client container
 up: build metrics-start cluster-start cluster-wait server-start gen-config client-start
+    @just summary
+
+# Print how to control the running client, component versions, and firewall state
+summary:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo ""
+    echo "── Gnosis VPN test stack ──────────────────────────────────────"
+    echo ""
+    echo "Control the client:"
+    echo "  docker exec -it gnosis_vpn-client gnosis_vpn-ctl status"
+    echo "  docker exec -it gnosis_vpn-client gnosis_vpn-ctl connect <destination-id>"
+    echo "  docker logs -f gnosis_vpn-client"
+    echo ""
+    echo "Component versions:"
+    just _component-version "gnosis_vpn-client" "{{GVPN_CLIENT_DIR}}"
+    just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
+    just _component-version "hoprd"             "{{HOPRD_DIR}}"
+    echo ""
+    echo "Host firewall P2P punch-through (UDP {{DOCKER_NETWORK_GATEWAY}}:9000+): $(just _firewall-status)"
+    echo ""
+    echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+    echo "─────────────────────────────────────────────────────────────────"
+
+# Print <name>'s checked-out commit, and tag if HEAD is exactly tagged
+_component-version name dir:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [ ! -d "{{dir}}/.git" ]; then
+        echo "  {{name}}: {{dir}} (not a git checkout)"
+        exit 0
+    fi
+    commit=$(git -C "{{dir}}" rev-parse --short HEAD 2>/dev/null) || { echo "  {{name}}: unable to resolve commit"; exit 0; }
+    tag=$(git -C "{{dir}}" describe --tags --exact-match 2>/dev/null || true)
+    dirty=""
+    [ -n "$(git -C "{{dir}}" status --porcelain 2>/dev/null)" ] && dirty=" (dirty)"
+    if [ -n "${tag}" ]; then
+        echo "  {{name}}: ${tag} (${commit})${dirty}"
+    else
+        echo "  {{name}}: ${commit}${dirty} (untagged)"
+    fi
+
+# Print the outcome recorded by the last firewall-allow-p2p run
+_firewall-status:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    status_file="{{CONFIG_DIR}}/firewall-status"
+    if [ -f "${status_file}" ]; then
+        cat "${status_file}"
+    else
+        echo "unknown (network-create hasn't run yet this session)"
+    fi
 
 # Tear the full stack down and purge client state (cluster always restarts with new identities)
 down: client-stop server-stop cluster-stop metrics-stop _purge-state
@@ -422,14 +483,6 @@ reset: down clean
 
 # Full development setup: build, bring the whole stack up including the client container
 development-setup: up
-    #!/usr/bin/env bash
-    echo ""
-    echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
-    echo ""
-    echo "Stack is up, including the client. Tail its logs with:"
-    echo ""
-    echo "    docker logs -f gnosis_vpn-client"
-    echo ""
 
 # Tail all cluster node logs and the client container's logs
 logs:

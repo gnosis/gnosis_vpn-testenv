@@ -70,6 +70,12 @@ container); the client container gets its WireGuard/routing privileges from
 `sudo` may still prompt once, best-effort, on hosts running the NixOS firewall
 — see [Firewall (NixOS hosts)](#firewall-nixos-hosts) below.
 
+`just up` (and thus `development-setup`) finishes by printing a summary: the
+`gnosis_vpn-ctl` commands to control the client, each component's checked-out
+commit (and tag, if any) for `gnosis_vpn-client`/`gnosis_vpn-server`/`hoprd`,
+and whether the firewall punch-through above is enabled. Re-print it anytime
+with `just summary`.
+
 `just up` does the same without the build step; useful for scripting and CI
 when components are pre-built.
 
@@ -178,6 +184,7 @@ tunnel via the HOPR mixnet, both outbound).
 | `reset`          | `down` followed by `clean` — full wipe                                     |
 | `logs`           | `tail -f` cluster node logs and `docker logs -f` the client container      |
 | `node-logs`      | `tail -f` only the hoprd node logs                                         |
+| `summary`        | Print `gnosis_vpn-ctl` usage, component commits/tags, and firewall state (runs as part of `up`) |
 | `network-create` | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`) |
 | `network-remove` | Removes `DOCKER_NETWORK` (runs as part of `clean`)                         |
 | `firewall-allow-p2p` | Best-effort host-firewall punch-through for the cluster's P2P ports (see below); runs as part of `network-create` |
