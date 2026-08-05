@@ -436,7 +436,7 @@ summary:
     echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
     echo "─────────────────────────────────────────────────────────────────"
 
-# Print <name>'s checked-out commit, and tag if HEAD is exactly tagged
+# Print <name>'s checked-out branch and commit, plus tag if HEAD is exactly tagged
 _component-version name dir:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -445,13 +445,14 @@ _component-version name dir:
         exit 0
     fi
     commit=$(git -C "{{dir}}" rev-parse --short HEAD 2>/dev/null) || { echo "  {{name}}: unable to resolve commit"; exit 0; }
+    branch=$(git -C "{{dir}}" symbolic-ref --short -q HEAD || echo "detached")
     tag=$(git -C "{{dir}}" describe --tags --exact-match 2>/dev/null || true)
     dirty=""
     [ -n "$(git -C "{{dir}}" status --porcelain 2>/dev/null)" ] && dirty=" (dirty)"
     if [ -n "${tag}" ]; then
-        echo "  {{name}}: ${tag} (${commit})${dirty}"
+        echo "  {{name}}: ${tag} (${branch}, ${commit})${dirty}"
     else
-        echo "  {{name}}: ${commit}${dirty} (untagged)"
+        echo "  {{name}}: ${branch} (${commit})${dirty}"
     fi
 
 # Print the outcome recorded by the last firewall-allow-p2p run
