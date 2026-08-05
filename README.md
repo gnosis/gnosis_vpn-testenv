@@ -65,8 +65,10 @@ just down
 
 `just development-setup` builds all components, then brings the whole stack up
 (localcluster, VPN server(s), metrics, generated config, and the client
-container) — no `sudo` needed anywhere; the client container gets its
-WireGuard/routing privileges from `--cap-add=NET_ADMIN` instead of host root.
+container); the client container gets its WireGuard/routing privileges from
+`--cap-add=NET_ADMIN` instead of host root, so no `sudo` is needed for that.
+`sudo` may still prompt once, best-effort, on hosts running the NixOS firewall
+— see [Firewall (NixOS hosts)](#firewall-nixos-hosts) below.
 
 `just up` does the same without the build step; useful for scripting and CI
 when components are pre-built.
@@ -178,6 +180,41 @@ tunnel via the HOPR mixnet, both outbound).
 | `node-logs`      | `tail -f` only the hoprd node logs                                         |
 | `network-create` | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`) |
 | `network-remove` | Removes `DOCKER_NETWORK` (runs as part of `clean`)                         |
+| `firewall-allow-p2p` | Best-effort host-firewall punch-through for the cluster's P2P ports (see below); runs as part of `network-create` |
+| `firewall-remove-p2p` | Reverts `firewall-allow-p2p`; runs as part of `network-remove` |
+
+## Firewall (NixOS hosts)
+
+The localcluster runs natively on the host and binds/announces its P2P
+transport (QUIC over UDP) on `DOCKER_NETWORK_GATEWAY:9000+i` — the Docker
+bridge's own gateway IP, not `127.0.0.1`. Traffic from the client container to
+that IP therefore traverses the host's real network stack, unlike loopback
+traffic, and is subject to the host's default-deny `INPUT` firewall chain.
+
+On hosts running NixOS's `networking.firewall` (enabled by default), this
+silently drops the client's connections to the cluster: `gnosis_vpn-ctl
+status` (or the client logs) will show peers fetched (`num_announced=3`) but
+never connected (`num_connected=0`), forever.
+
+`network-create` now runs `firewall-allow-p2p`, which best-effort inserts an
+`iptables` rule (via `sudo`, prompting once) accepting UDP
+`9000..9000+CLUSTER_SIZE-1` from the testenv's Docker bridge interface into
+the NixOS-managed `nixos-fw` chain. It's a no-op on hosts without that chain
+(macOS, other Linux distros, firewall disabled). `network-remove` reverts it
+via `firewall-remove-p2p`.
+
+This is a runtime rule, not persisted in your NixOS configuration — it's lost
+on firewall reload/reboot and reapplied next time you run `just up`. To make
+it permanent instead, add to your host's NixOS config:
+
+```nix
+networking.firewall.extraCommands = ''
+  iptables -A nixos-fw -i br-+ -p udp --dport 9000:9010 -j nixos-fw-accept
+'';
+```
+
+(adjust the port range to your `CLUSTER_SIZE`; `br-+` matches any Docker
+bridge interface).
 
 ## Notes
 
