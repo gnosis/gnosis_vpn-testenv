@@ -69,42 +69,49 @@ network-create:
         docker network create --subnet "{{DOCKER_NETWORK_SUBNET}}" --gateway "{{DOCKER_NETWORK_GATEWAY}}" "{{DOCKER_NETWORK}}"
         echo "Created Docker network {{DOCKER_NETWORK}} (subnet {{DOCKER_NETWORK_SUBNET}}, gateway {{DOCKER_NETWORK_GATEWAY}})"
     fi
-    just firewall-allow-p2p
+    just firewall-allow-p2p || echo "firewall-allow-p2p failed — continuing without the host-firewall punch-through (see README)"
 
 # Remove the Docker network
 network-remove:
     #!/usr/bin/env bash
     set -euo pipefail
-    just firewall-remove-p2p
+    just firewall-remove-p2p || echo "firewall-remove-p2p failed — leftover rule (if any) can be cleared manually"
     docker network rm "{{DOCKER_NETWORK}}" 2>/dev/null || true
 
-# Best-effort: allow the localcluster's P2P UDP ports through the host firewall (see README); no-op without a nixos-fw chain
+# Best-effort: allow the localcluster's P2P UDP ports through the host firewall (see README); warns rather than fails without a nixos-fw chain
 firewall-allow-p2p:
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -uo pipefail
     # DOCKER_NETWORK_GATEWAY is a real host interface, so traffic to it (unlike 127.0.0.1)
     # hits the host's INPUT chain — NixOS's default-deny nixos-fw silently drops it otherwise.
     if ! sudo iptables -L nixos-fw -n > /dev/null 2>&1; then
+        echo "firewall-allow-p2p: no nixos-fw chain found (not a NixOS host, or firewall disabled) — skipping"
         exit 0
     fi
     if ! docker network inspect "{{DOCKER_NETWORK}}" > /dev/null 2>&1; then
+        echo "firewall-allow-p2p: Docker network {{DOCKER_NETWORK}} not found — skipping"
         exit 0
     fi
     network_id=$(docker network inspect "{{DOCKER_NETWORK}}" | jq -r '.[0].Id')
+    if [ -z "${network_id}" ]; then
+        echo "firewall-allow-p2p: warning: could not resolve {{DOCKER_NETWORK}}'s bridge interface — skipping"
+        exit 0
+    fi
     bridge_if="br-${network_id:0:12}"
     port_lo=9000
     port_hi=$((9000 + {{CLUSTER_SIZE}} - 1))
     if sudo iptables -C nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT 2>/dev/null; then
         echo "Host firewall already allows UDP ${port_lo}-${port_hi} from ${bridge_if}"
-    else
-        sudo iptables -I nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT
+    elif sudo iptables -I nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT; then
         echo "Opened UDP ${port_lo}-${port_hi} from ${bridge_if} in host firewall (nixos-fw)"
+    else
+        echo "firewall-allow-p2p: warning: failed to insert firewall rule — continuing without it"
     fi
 
-# Best-effort: remove the firewall-allow-p2p rule (run before the network itself is removed)
+# Best-effort: remove the firewall-allow-p2p rule (run before the network itself is removed); warns rather than fails
 firewall-remove-p2p:
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -uo pipefail
     if ! sudo iptables -L nixos-fw -n > /dev/null 2>&1; then
         exit 0
     fi
@@ -112,10 +119,15 @@ firewall-remove-p2p:
         exit 0
     fi
     network_id=$(docker network inspect "{{DOCKER_NETWORK}}" | jq -r '.[0].Id')
+    if [ -z "${network_id}" ]; then
+        exit 0
+    fi
     bridge_if="br-${network_id:0:12}"
     port_lo=9000
     port_hi=$((9000 + {{CLUSTER_SIZE}} - 1))
-    sudo iptables -D nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT 2>/dev/null || true
+    if ! sudo iptables -D nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT 2>/dev/null; then
+        echo "firewall-remove-p2p: warning: rule not found or could not be removed — leftover rule (if any) can be cleared manually"
+    fi
 
 # ─── Localcluster ────────────────────────────────────────────────────────────
 
