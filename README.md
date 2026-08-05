@@ -71,6 +71,22 @@ WireGuard/routing privileges from `--cap-add=NET_ADMIN` instead of host root.
 `just up` does the same without the build step; useful for scripting and CI
 when components are pre-built.
 
+## Issuing client commands
+
+Once the stack is up, control the running client via `gnosis_vpn-ctl` inside
+its container — the client image symlinks the binary onto `PATH` for exactly
+this purpose:
+
+```sh
+docker exec -it gnosis_vpn-client gnosis_vpn-ctl status
+docker exec -it gnosis_vpn-client gnosis_vpn-ctl connect <destination-id>
+docker exec -it gnosis_vpn-client gnosis_vpn-ctl --help
+```
+
+`gnosis_vpn-ctl` talks to the client's `gnosis_vpn-root` process over
+`/var/run/gnosisvpn.sock` inside the container, so no `--socket-path` flag is
+needed when run this way.
+
 ## Running system tests
 
 ```sh
