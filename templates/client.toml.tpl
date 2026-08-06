@@ -10,7 +10,7 @@ probe_local_addresses = true
 target = "127.0.0.1:8000"
 
 [connection.wg]
-target = "127.0.0.1:51820"
+target = "127.0.0.1:51821"
 
 # WireGuard server interface address — defined in gnosis_vpn-server/docker/wggvpn.conf
 [connection.ping]
