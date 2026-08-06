@@ -1,8 +1,8 @@
 # Gnosis VPN test environment
 
 Local development and system-test stack for Gnosis VPN. Orchestrates a HOPR
-localcluster, one or more containerised Gnosis VPN server (exit node)
-instances, and a containerised Gnosis VPN client against them.
+localcluster, one or more containerised Gnosis VPN server (exit node) instances,
+and a containerised Gnosis VPN client against them.
 
 ## Prerequisites
 
@@ -16,17 +16,17 @@ instances, and a containerised Gnosis VPN client against them.
 
 The client and the exit-node servers used to run on the same host network. The
 client's full-tunnel WireGuard route (`0.0.0.0/1` + `128.0.0.0/1` via `wg0`) is
-installed into the *main routing table*, so once it was up, it captured every
+installed into the _main routing table_, so once it was up, it captured every
 outbound packet on that host — including the exit-node container's own
-Docker-NATed egress to the real internet. That packet would get pulled back
-into the tunnel instead of leaving, producing a routing loop rather than
-internet access.
+Docker-NATed egress to the real internet. That packet would get pulled back into
+the tunnel instead of leaving, producing a routing loop rather than internet
+access.
 
 Running the client in its own container fixes this architecturally: its
 full-tunnel route now lives only in the client container's own network
-namespace, so it can no longer capture the exit-node container's (or the
-host's) traffic. The localcluster still runs natively on the host; the client
-container reaches it over a dedicated Docker network (see below).
+namespace, so it can no longer capture the exit-node container's (or the host's)
+traffic. The localcluster still runs natively on the host; the client container
+reaches it over a dedicated Docker network (see below).
 
 ## Sibling repo paths
 
@@ -67,23 +67,20 @@ just down
 (localcluster, VPN server(s), metrics, generated config, and the client
 container); the client container gets its WireGuard/routing privileges from
 `--cap-add=NET_ADMIN` instead of host root, so no `sudo` is needed for that.
-`sudo` may still prompt once, best-effort, on hosts running the NixOS firewall
-— see [Firewall (NixOS hosts)](#firewall-nixos-hosts) below.
 
 `just up` (and thus `development-setup`) finishes by printing a summary: the
-`gnosis_vpn-ctl` commands to control the client, each component's checked-out
-commit (and tag, if any) for `gnosis_vpn-client`/`gnosis_vpn-server`/`hoprd`,
-and whether the firewall punch-through above is enabled. Re-print it anytime
-with `just summary`.
+`gnosis_vpn-ctl` commands to control the client and each component's checked-out
+commit (and tag, if any) for `gnosis_vpn-client`/`gnosis_vpn-server`/`hoprd`.
+Re-print it anytime with `just summary`.
 
-`just up` does the same without the build step; useful for scripting and CI
-when components are pre-built.
+`just up` does the same without the build step; useful for scripting and CI when
+components are pre-built.
 
 ## Issuing client commands
 
-Once the stack is up, control the running client via `gnosis_vpn-ctl` inside
-its container — the client image symlinks the binary onto `PATH` for exactly
-this purpose:
+Once the stack is up, control the running client via `gnosis_vpn-ctl` inside its
+container — the client image symlinks the binary onto `PATH` for exactly this
+purpose:
 
 ```sh
 docker exec -it gnosis_vpn-client gnosis_vpn-ctl status
@@ -106,7 +103,7 @@ just down
 ## Configuration variables
 
 | Variable                 | Default                                                                   | Purpose                                        |
-| ------------------------ | -------------------------------------------------------------------------- | ---------------------------------------------- |
+| ------------------------ | ------------------------------------------------------------------------- | ---------------------------------------------- |
 | `HOPRD_DIR`              | `../hoprd`                                                                | Path to hoprd repo                             |
 | `GVPN_SERVER_DIR`        | `../gnosis_vpn-server`                                                    | Path to gnosis_vpn-server repo                 |
 | `GVPN_CLIENT_DIR`        | `../gnosis_vpn-client`                                                    | Path to gnosis_vpn-client repo                 |
@@ -128,9 +125,9 @@ just down
 ## Client state directory
 
 The client container stores persistent state (identity keys, cache) under
-`CLIENT_STATE_DIR`, bind-mounted into the container at `/var/lib/gnosisvpn`.
-The container's entrypoint `chown`s it to the worker's internal user on
-startup, so removing it later needs `sudo` (see below).
+`CLIENT_STATE_DIR`, bind-mounted into the container at `/var/lib/gnosisvpn`. The
+container's entrypoint `chown`s it to the worker's internal user on startup, so
+removing it later needs `sudo` (see below).
 
 ### Purging state
 
@@ -178,50 +175,25 @@ tunnel via the HOPR mixnet, both outbound).
 
 ## Utility recipes
 
-| Recipe           | What it does                                                                |
-| ---------------- | ---------------------------------------------------------------------------- |
-| `clean`          | Removes all generated configs, data dirs, log files, and Nix results       |
-| `reset`          | `down` followed by `clean` — full wipe                                     |
-| `logs`           | `tail -f` cluster node logs and `docker logs -f` the client container      |
-| `node-logs`      | `tail -f` only the hoprd node logs                                         |
-| `summary`        | Print `gnosis_vpn-ctl` usage, component commits/tags, and firewall state (runs as part of `up`) |
-| `network-create` | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`) |
-| `network-remove` | Removes `DOCKER_NETWORK` (runs as part of `clean`)                         |
-| `firewall-allow-p2p` | Best-effort host-firewall punch-through for the cluster's P2P ports (see below); runs as part of `network-create` |
-| `firewall-remove-p2p` | Reverts `firewall-allow-p2p`; runs as part of `network-remove` |
+| Recipe           | What it does                                                                   |
+| ---------------- | ------------------------------------------------------------------------------ |
+| `clean`          | Removes all generated configs, data dirs, log files, and Nix results           |
+| `reset`          | `down` followed by `clean` — full wipe                                         |
+| `logs`           | `tail -f` cluster node logs and `docker logs -f` the client container          |
+| `node-logs`      | `tail -f` only the hoprd node logs                                             |
+| `summary`        | Print `gnosis_vpn-ctl` usage and component commits/tags (runs as part of `up`) |
+| `network-create` | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`)    |
+| `network-remove` | Removes `DOCKER_NETWORK` (runs as part of `clean`)                             |
 
-## Firewall (NixOS hosts)
-
-The localcluster runs natively on the host and binds/announces its P2P
-transport (QUIC over UDP) on `DOCKER_NETWORK_GATEWAY:9000+i` — the Docker
-bridge's own gateway IP, not `127.0.0.1`. Traffic from the client container to
-that IP therefore traverses the host's real network stack, unlike loopback
-traffic, and is subject to the host's default-deny `INPUT` firewall chain.
-
-On hosts running NixOS's `networking.firewall` (enabled by default), this
-silently drops the client's connections to the cluster: `gnosis_vpn-ctl
-status` (or the client logs) will show peers fetched (`num_announced=3`) but
-never connected (`num_connected=0`), forever.
-
-`network-create` now runs `firewall-allow-p2p`, which best-effort inserts an
-`iptables` rule (via `sudo`, prompting once) accepting UDP
-`9000..9000+CLUSTER_SIZE-1` from the testenv's Docker bridge interface into
-the NixOS-managed `nixos-fw` chain. It's a no-op on hosts without that chain
-(macOS, other Linux distros, firewall disabled). `network-remove` reverts it
-via `firewall-remove-p2p`.
-
-This is a runtime rule, not persisted in your NixOS configuration — it's lost
-on firewall reload/reboot and reapplied next time you run `just up`. To make
-it permanent instead, add to your host's NixOS config:
-
-```nix
-networking.firewall.extraCommands = ''
-  iptables -A nixos-fw -i br-+ -p udp --dport 9000:9010 -j nixos-fw-accept
-'';
-```
-
-(adjust the port range to your `CLUSTER_SIZE`; `br-+` matches any Docker
-bridge interface).
+On hosts running a default-deny host firewall (e.g. NixOS's
+`networking.firewall`), the localcluster's P2P transport
+(`DOCKER_NETWORK_GATEWAY:9000+i`) may be unreachable from the client container:
+`gnosis_vpn-ctl status` (or the client logs) will show peers fetched
+(`num_announced=3`) but never connected (`num_connected=0`), forever. If you hit
+this, allow inbound UDP `9000..9000+CLUSTER_SIZE-1` from the testenv's Docker
+bridge interface (`docker network inspect
+$DOCKER_NETWORK` to find it) through
+your host firewall.
 
 ## Notes
 
@@ -240,5 +212,5 @@ bridge interface).
   on the host, native processes (e.g. `system-tests`) reach it exactly as they
   reached `127.0.0.1` before; containers on `DOCKER_NETWORK` reach it too.
 - Exit-node (`gnosis_vpn-server`) containers are unaffected by this change and
-  don't join `DOCKER_NETWORK` — the cluster already reaches their published
-  host ports directly, as before.
+  don't join `DOCKER_NETWORK` — the cluster already reaches their published host
+  ports directly, as before.

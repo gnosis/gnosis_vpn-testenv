@@ -69,74 +69,10 @@ network-create:
         docker network create --subnet "{{DOCKER_NETWORK_SUBNET}}" --gateway "{{DOCKER_NETWORK_GATEWAY}}" "{{DOCKER_NETWORK}}"
         echo "Created Docker network {{DOCKER_NETWORK}} (subnet {{DOCKER_NETWORK_SUBNET}}, gateway {{DOCKER_NETWORK_GATEWAY}})"
     fi
-    just firewall-allow-p2p || echo "firewall-allow-p2p failed — continuing without the host-firewall punch-through (see README)"
 
 # Remove the Docker network
 network-remove:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just firewall-remove-p2p || echo "firewall-remove-p2p failed — leftover rule (if any) can be cleared manually"
     docker network rm "{{DOCKER_NETWORK}}" 2>/dev/null || true
-
-# Best-effort: allow the localcluster's P2P UDP ports through the host firewall (see README); warns rather than fails without a nixos-fw chain
-firewall-allow-p2p:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    mkdir -p "{{CONFIG_DIR}}"
-    status_file="{{CONFIG_DIR}}/firewall-status"
-    # DOCKER_NETWORK_GATEWAY is a real host interface, so traffic to it (unlike 127.0.0.1)
-    # hits the host's INPUT chain — NixOS's default-deny nixos-fw silently drops it otherwise.
-    # Outcome is recorded to status_file so `just summary` can report it without re-prompting sudo.
-    if ! sudo iptables -L nixos-fw -n > /dev/null 2>&1; then
-        echo "firewall-allow-p2p: no nixos-fw chain found (not a NixOS host, or firewall disabled) — skipping"
-        echo "disabled: no nixos-fw chain (not NixOS, firewall off, or no sudo access)" > "${status_file}"
-        exit 0
-    fi
-    if ! docker network inspect "{{DOCKER_NETWORK}}" > /dev/null 2>&1; then
-        echo "firewall-allow-p2p: Docker network {{DOCKER_NETWORK}} not found — skipping"
-        echo "unknown: Docker network {{DOCKER_NETWORK}} not found" > "${status_file}"
-        exit 0
-    fi
-    network_id=$(docker network inspect "{{DOCKER_NETWORK}}" | jq -r '.[0].Id')
-    if [ -z "${network_id}" ]; then
-        echo "firewall-allow-p2p: warning: could not resolve {{DOCKER_NETWORK}}'s bridge interface — skipping"
-        echo "unknown: could not resolve bridge interface" > "${status_file}"
-        exit 0
-    fi
-    bridge_if="br-${network_id:0:12}"
-    port_lo=9000
-    port_hi=$((9000 + {{CLUSTER_SIZE}} - 1))
-    if sudo iptables -C nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT 2>/dev/null; then
-        echo "Host firewall already allows UDP ${port_lo}-${port_hi} from ${bridge_if}"
-        echo "enabled: UDP ${port_lo}-${port_hi} allowed from ${bridge_if}" > "${status_file}"
-    elif sudo iptables -I nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT; then
-        echo "Opened UDP ${port_lo}-${port_hi} from ${bridge_if} in host firewall (nixos-fw)"
-        echo "enabled: UDP ${port_lo}-${port_hi} allowed from ${bridge_if}" > "${status_file}"
-    else
-        echo "firewall-allow-p2p: warning: failed to insert firewall rule — continuing without it"
-        echo "disabled: failed to insert rule for ${bridge_if}" > "${status_file}"
-    fi
-
-# Best-effort: remove the firewall-allow-p2p rule (run before the network itself is removed); warns rather than fails
-firewall-remove-p2p:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    if ! sudo iptables -L nixos-fw -n > /dev/null 2>&1; then
-        exit 0
-    fi
-    if ! docker network inspect "{{DOCKER_NETWORK}}" > /dev/null 2>&1; then
-        exit 0
-    fi
-    network_id=$(docker network inspect "{{DOCKER_NETWORK}}" | jq -r '.[0].Id')
-    if [ -z "${network_id}" ]; then
-        exit 0
-    fi
-    bridge_if="br-${network_id:0:12}"
-    port_lo=9000
-    port_hi=$((9000 + {{CLUSTER_SIZE}} - 1))
-    if ! sudo iptables -D nixos-fw -i "${bridge_if}" -p udp --dport "${port_lo}:${port_hi}" -j ACCEPT 2>/dev/null; then
-        echo "firewall-remove-p2p: warning: rule not found or could not be removed — leftover rule (if any) can be cleared manually"
-    fi
 
 # ─── Localcluster ────────────────────────────────────────────────────────────
 
@@ -414,7 +350,7 @@ metrics-stop:
 up: build metrics-start cluster-start cluster-wait server-start gen-config client-start
     @just summary
 
-# Print how to control the running client, component versions, and firewall state
+# Print how to control the running client and component versions
 summary:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -430,8 +366,6 @@ summary:
     just _component-version "gnosis_vpn-client" "{{GVPN_CLIENT_DIR}}"
     just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
     just _component-version "hoprd"             "{{HOPRD_DIR}}"
-    echo ""
-    echo "Host firewall P2P punch-through (UDP {{DOCKER_NETWORK_GATEWAY}}:9000+): $(just _firewall-status)"
     echo ""
     echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
     echo "─────────────────────────────────────────────────────────────────"
@@ -453,17 +387,6 @@ _component-version name dir:
         echo "  {{name}}: ${tag} (${branch}, ${commit})${dirty}"
     else
         echo "  {{name}}: ${branch} (${commit})${dirty}"
-    fi
-
-# Print the outcome recorded by the last firewall-allow-p2p run
-_firewall-status:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    status_file="{{CONFIG_DIR}}/firewall-status"
-    if [ -f "${status_file}" ]; then
-        cat "${status_file}"
-    else
-        echo "unknown (network-create hasn't run yet this session)"
     fi
 
 # Tear the full stack down and purge client state (cluster always restarts with new identities)
