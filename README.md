@@ -115,6 +115,8 @@ just down
 | `DOCKER_NETWORK_GATEWAY` | `172.30.0.1`                                                              | Gateway IP — also the cluster's P2P bind host  |
 | `CLIENT_STATE_DIR`       | `/tmp/gnosis_vpn-testenv-state`                                           | Persistent worker state (identity keys, cache) |
 | `CLIENT_LOG_LEVEL`       | `warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the client                        |
+| `CLIENT_WORKER_USER`     | `gnosisvpntestenv`                                                        | Host user for `up-client-on-host` (must exist) |
+| `CLIENT_LOG_FILE`        | `/tmp/gnosis_vpn-client.log`                                              | Log file for `up-client-on-host`                |
 | `SERVER_LOG_LEVEL`       | `info`                                                                    | RUST_LOG for VPN server containers             |
 | `CLUSTER_LOG_LEVEL`      | `info`                                                                    | RUST_LOG for the localcluster                  |
 | `DATA_DIR`               | `/tmp/hopr-nodes`                                                         | Localcluster data directory                    |
@@ -137,6 +139,25 @@ just purge-state
 
 Deletes `CLIENT_STATE_DIR` after asking for a `yes` confirmation. Use this to
 start with a clean identity after a failed run or when rotating keys.
+
+## Running the client on the host (dev/debug)
+
+```sh
+just up-client-on-host
+just client-logs-on-host
+just client-stop-on-host
+```
+
+An alternative to `just up`/`client-start` that runs `gnosis_vpn-root` and
+`gnosis_vpn-worker` as native host processes instead of in Docker — useful for
+attaching a debugger or otherwise skipping the container network path. This
+reintroduces the routing-loop risk the container was built to avoid (see
+"Why the client runs in its own container" above) if `gnosis_vpn-server`
+shares the host's egress, and requires `CLIENT_WORKER_USER` to already exist
+as a system account (`gnosis_vpn-root` drops privileges to it by uid/gid when
+spawning the worker — its home directory doesn't matter). Don't run this
+alongside `client-start`; both would fight over `CLIENT_STATE_DIR` and the
+default control socket.
 
 ## Metrics stack
 
@@ -184,6 +205,9 @@ tunnel via the HOPR mixnet, both outbound).
 | `summary`        | Print `gnosis_vpn-ctl` usage and component commits/tags (runs as part of `up`) |
 | `network-create` | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`)    |
 | `network-remove` | Removes `DOCKER_NETWORK` (runs as part of `clean`)                             |
+| `up-client-on-host` | `up`, but the client runs natively on the host — see below                 |
+| `client-logs-on-host` | `tail -f` the host-native client's log file                             |
+| `client-stop-on-host` | Stops the host-native client                                            |
 
 On hosts running a default-deny host firewall (e.g. NixOS's
 `networking.firewall`), the localcluster's P2P transport

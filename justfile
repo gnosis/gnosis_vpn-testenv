@@ -31,6 +31,12 @@ CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 # Persistent worker state (identity keys, cache) bind-mounted into the client container
 CLIENT_STATE_DIR := env_var_or_default("CLIENT_STATE_DIR", "/tmp/gnosis_vpn-testenv-state")
 
+# OS user gnosis_vpn-root drops privileges to when spawning gnosis_vpn-worker (host-native client only; must already exist)
+CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpntestenv")
+
+# Client log file path (host-native client only — the container relies on `docker logs` instead)
+CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client.log")
+
 # Generated config output dir
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
@@ -53,6 +59,10 @@ build-server:
 # Build gnosis_vpn-client Docker image
 build-client:
     cd {{GVPN_CLIENT_DIR}} && just docker-build
+
+# Build gnosis_vpn-client binaries only (no Docker image) — for the host-native client
+build-client-native:
+    cd {{GVPN_CLIENT_DIR}} && just build
 
 # Build all components
 build: build-cluster build-server build-client
@@ -266,6 +276,59 @@ client-start: network-create
 client-stop:
     docker stop gnosis_vpn-client 2>/dev/null || true
 
+# Reintroduces the routing-loop risk the container was built to avoid (see README "Why the
+# client runs in its own container") if gnosis_vpn-server shares the host's egress — don't run
+# this alongside `client-start`, they'd collide over CLIENT_STATE_DIR and the default control socket.
+# Start gnosis_vpn-client as a native host process instead of in Docker (dev/debug convenience)
+client-start-on-host: network-create
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
+    worker_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
+    if [ ! -f "${root_bin}" ] || [ ! -f "${worker_bin}" ]; then
+        echo "Error: gnosis_vpn-client binaries not found at {{GVPN_CLIENT_DIR}}/result/bin/" >&2
+        echo "Run 'just build-client-native' to build them first" >&2
+        exit 1
+    fi
+    if ! id "{{CLIENT_WORKER_USER}}" > /dev/null 2>&1; then
+        echo "Error: worker user '{{CLIENT_WORKER_USER}}' not found on this host." >&2
+        echo "gnosis_vpn-root drops privileges to this user (by uid/gid) when spawning gnosis_vpn-worker," >&2
+        echo "so it must already exist as a system account (its home directory is irrelevant — create" >&2
+        echo "one via your NixOS config, or override the name via CLIENT_WORKER_USER)." >&2
+        exit 1
+    fi
+    if pgrep -f gnosis_vpn-root > /dev/null 2>&1; then
+        echo "Client already running on host — skipping start"
+        exit 0
+    fi
+    mkdir -p "{{CLIENT_STATE_DIR}}"
+    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
+    extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    # sudo backgrounded can't read TTY; pre-authenticate while still interactive
+    sudo -v
+    sudo RUST_LOG="{{CLIENT_LOG_LEVEL}}" \
+        GNOSISVPN_CONFIG_PATH="{{CONFIG_DIR}}/client.toml" \
+        GNOSISVPN_HOPR_BLOKLI_URL="${blokli_url}" \
+        GNOSISVPN_HOPR_IDENTITY_FILE="{{CONFIG_DIR}}/extra_id.id" \
+        GNOSISVPN_HOPR_IDENTITY_PASS="${extra_id_pass}" \
+        GNOSISVPN_HOME="{{CLIENT_STATE_DIR}}" \
+        GNOSISVPN_CLIENT_AUTOSTART=30min \
+        GNOSISVPN_WORKER_USER="{{CLIENT_WORKER_USER}}" \
+        GNOSISVPN_LOG_FILE="{{CLIENT_LOG_FILE}}" \
+        "${root_bin}" --worker-binary "${worker_bin}" &
+    echo "Client PID: $!"
+
+# Stop the host-native client (cascades SIGTERM to the worker via gnosis_vpn-root)
+client-stop-on-host:
+    #!/usr/bin/env bash
+    sudo pkill -f gnosis_vpn-root   2>/dev/null || true
+    sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
+    echo "Client (host) stopped"
+
+# Tail the host-native client's log file
+client-logs-on-host:
+    tail -f "{{CLIENT_LOG_FILE}}"
+
 # Purge worker state without prompting (used by down).
 # sudo: the container's entrypoint chowns this bind-mounted dir to its internal
 # worker uid, which may not be removable by the host user without it.
@@ -350,6 +413,11 @@ metrics-stop:
 up: build metrics-start cluster-start cluster-wait server-start gen-config client-start
     @just summary
 
+# See the caveat on client-start-on-host before using this instead of `up`
+# Bring the full stack up with the client running natively on the host instead of in Docker
+up-client-on-host: build-cluster build-server build-client-native metrics-start cluster-start cluster-wait server-start gen-config client-start-on-host
+    @just summary-host-client
+
 # Print how to control the running client and component versions
 summary:
     #!/usr/bin/env bash
@@ -361,6 +429,26 @@ summary:
     echo "  docker exec -it gnosis_vpn-client gnosis_vpn-ctl status"
     echo "  docker exec -it gnosis_vpn-client gnosis_vpn-ctl connect <destination-id>"
     echo "  docker logs -f gnosis_vpn-client"
+    echo ""
+    echo "Component versions:"
+    just _component-version "gnosis_vpn-client" "{{GVPN_CLIENT_DIR}}"
+    just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
+    just _component-version "hoprd"             "{{HOPRD_DIR}}"
+    echo ""
+    echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+    echo "─────────────────────────────────────────────────────────────────"
+
+# Print how to control the host-native client and component versions
+summary-host-client:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo ""
+    echo "── Gnosis VPN test stack (client on host) ─────────────────────"
+    echo ""
+    echo "Control the client:"
+    echo "  {{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-ctl status"
+    echo "  {{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-ctl connect <destination-id>"
+    echo "  just client-logs-on-host"
     echo ""
     echo "Component versions:"
     just _component-version "gnosis_vpn-client" "{{GVPN_CLIENT_DIR}}"
