@@ -1,6 +1,11 @@
 version = 6
 
 ${DESTINATIONS}
+# the local cluster announces private/local IPs (Docker network, or loopback in
+# host-native mode), which the client filters out by default
+[connection]
+probe_local_addresses = true
+
 [connection.bridge]
 target = "127.0.0.1:8000"
 
