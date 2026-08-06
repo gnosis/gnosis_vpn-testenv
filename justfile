@@ -272,9 +272,16 @@ client-start: network-create
         gnosis_vpn-client
     echo "Started gnosis_vpn-client"
 
-# Stop the client container
+# Stop the client, wherever it's running (container or host-native — used by down)
 client-stop:
+    #!/usr/bin/env bash
     docker stop gnosis_vpn-client 2>/dev/null || true
+    # only touch sudo if a host-native client is actually running, so the container-only
+    # workflow (the common case) never hits a sudo prompt here
+    if pgrep -f gnosis_vpn-root > /dev/null 2>&1 || pgrep -f gnosis_vpn-worker > /dev/null 2>&1; then
+        sudo pkill -f gnosis_vpn-root   2>/dev/null || true
+        sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
+    fi
 
 # Reintroduces the routing-loop risk the container was built to avoid (see README "Why the
 # client runs in its own container") if gnosis_vpn-server shares the host's egress — don't run
