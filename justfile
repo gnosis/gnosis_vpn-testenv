@@ -221,6 +221,7 @@ server-start:
             --cap-add=NET_ADMIN \
             --add-host=host.docker.internal:host-gateway \
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            --sysctl net.ipv4.ip_forward=1 \
             --name "${name}" \
             gnosis_vpn-server
         echo "Started ${name} — WireGuard: ${wg_port}/udp, API: ${api_port}"
