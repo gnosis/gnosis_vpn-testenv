@@ -122,6 +122,42 @@ cluster-start: network-create
         --extra-identities 1 &
     echo "Localcluster PID: $!"
 
+# Start localcluster for a host-native client (see up-client-on-host); P2P binds to loopback instead of the Docker gateway
+cluster-start-on-host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    if [ ! -f "${hoprd_bin}" ]; then
+        echo "Error: hoprd not found at ${hoprd_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
+    if [ "${cluster_state}" = "failed" ]; then
+        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
+        exit 1
+    fi
+    if [ "${cluster_state}" != "not_running" ]; then
+        pid=$(pgrep -f hoprd-localcluster | head -1)
+        echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
+        exit 0
+    fi
+    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
+        "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
+        --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
+        --chain-image "{{CHAIN_IMAGE}}" \
+        --size        {{CLUSTER_SIZE}} \
+        --p2p-host    127.0.0.1 \
+        --data-dir    "{{DATA_DIR}}" \
+        --extra-identities 1 &
+    echo "Localcluster PID: $!"
+
 # Poll until cluster reaches state=running
 cluster-wait:
     #!/usr/bin/env bash
@@ -287,7 +323,7 @@ client-stop:
 # client runs in its own container") if gnosis_vpn-server shares the host's egress — don't run
 # this alongside `client-start`, they'd collide over CLIENT_STATE_DIR and the default control socket.
 # Start gnosis_vpn-client as a native host process instead of in Docker (dev/debug convenience)
-client-start-on-host: network-create
+client-start-on-host:
     #!/usr/bin/env bash
     set -euo pipefail
     root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
@@ -422,7 +458,7 @@ up: build metrics-start cluster-start cluster-wait server-start gen-config clien
 
 # See the caveat on client-start-on-host before using this instead of `up`
 # Bring the full stack up with the client running natively on the host instead of in Docker
-up-client-on-host: build-cluster build-server build-client-native metrics-start cluster-start cluster-wait server-start gen-config client-start-on-host
+up-client-on-host: build-cluster build-server build-client-native metrics-start cluster-start-on-host cluster-wait server-start gen-config client-start-on-host
     @just summary-host-client
 
 # Print how to control the running client and component versions

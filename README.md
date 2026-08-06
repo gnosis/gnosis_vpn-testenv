@@ -150,14 +150,19 @@ just client-stop-on-host
 
 An alternative to `just up`/`client-start` that runs `gnosis_vpn-root` and
 `gnosis_vpn-worker` as native host processes instead of in Docker — useful for
-attaching a debugger or otherwise skipping the container network path. This
-reintroduces the routing-loop risk the container was built to avoid (see
-"Why the client runs in its own container" above) if `gnosis_vpn-server`
-shares the host's egress, and requires `CLIENT_WORKER_USER` to already exist
-as a system account (`gnosis_vpn-root` drops privileges to it by uid/gid when
-spawning the worker — its home directory doesn't matter). Don't run this
-alongside `client-start`; both would fight over `CLIENT_STATE_DIR` and the
-default control socket.
+attaching a debugger or otherwise skipping the container network path. It also
+runs the localcluster via `cluster-start-on-host` instead of `cluster-start`,
+which binds P2P on `127.0.0.1` rather than `DOCKER_NETWORK_GATEWAY` — since
+there's no containerized client to route it to over a bridge, `DOCKER_NETWORK`
+isn't created or used at all in this mode, which also sidesteps the host
+firewall / P2P reachability issue noted below entirely. This reintroduces the
+routing-loop risk the container was built to avoid (see "Why the client runs
+in its own container" above) if `gnosis_vpn-server` shares the host's egress,
+and requires `CLIENT_WORKER_USER` to already exist as a system account
+(`gnosis_vpn-root` drops privileges to it by uid/gid when spawning the worker
+— its home directory doesn't matter). Don't run this alongside
+`client-start`/`cluster-start`; they'd fight over `CLIENT_STATE_DIR`, the
+default control socket, and the cluster's bound `--p2p-host`.
 
 ## Metrics stack
 
@@ -206,6 +211,7 @@ tunnel via the HOPR mixnet, both outbound).
 | `network-create` | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`)    |
 | `network-remove` | Removes `DOCKER_NETWORK` (runs as part of `clean`)                             |
 | `up-client-on-host` | `up`, but the client runs natively on the host — see below                 |
+| `cluster-start-on-host` | Localcluster variant used by `up-client-on-host` — P2P on `127.0.0.1`  |
 | `client-logs-on-host` | `tail -f` the host-native client's log file                             |
 | `client-stop-on-host` | Stops the host-native client                                            |
 
