@@ -552,7 +552,14 @@ summary-on-network:
 _lan-ip:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Downstream recipes splice this into host:port strings and firewall rules, so it must be
+    # a plain IPv4 dotted-quad — a hostname or IPv6 address would silently produce invalid targets.
+    ipv4_pattern='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
     if [ -n "{{LAN_IP}}" ]; then
+        if ! [[ "{{LAN_IP}}" =~ ${ipv4_pattern} ]]; then
+            echo "Error: LAN_IP='{{LAN_IP}}' is not an IPv4 dotted-quad (hostnames/IPv6 aren't supported)" >&2
+            exit 1
+        fi
         echo "{{LAN_IP}}"
         exit 0
     fi
