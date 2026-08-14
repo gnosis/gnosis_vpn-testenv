@@ -92,8 +92,8 @@ network-remove:
 
 # ─── Localcluster ────────────────────────────────────────────────────────────
 
-# Start localcluster (--extra-identities 1 pre-funds the client identity; P2P binds to the Docker gateway IP)
-cluster-start: network-create
+# Shared start/restart logic for the three cluster-start* variants below: binary checks, skip-if-already-running-on-this-host, restart-if-running-on-a-different-host, spawn.
+_cluster-start p2p_host:
     #!/usr/bin/env bash
     set -euo pipefail
     lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
@@ -108,7 +108,7 @@ cluster-start: network-create
         echo "Run 'just build-cluster' to build it first" >&2
         exit 1
     fi
-    p2p_host="{{DOCKER_NETWORK_GATEWAY}}"
+    p2p_host="{{p2p_host}}"
     cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
     if [ "${cluster_state}" = "failed" ]; then
         echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
@@ -133,90 +133,18 @@ cluster-start: network-create
         --data-dir    "{{DATA_DIR}}" \
         --extra-identities 1 &
     echo "Localcluster PID: $! (P2P on ${p2p_host})"
+
+# Start localcluster (--extra-identities 1 pre-funds the client identity; P2P binds to the Docker gateway IP)
+cluster-start: network-create
+    just _cluster-start {{DOCKER_NETWORK_GATEWAY}}
 
 # Start localcluster for a host-native client (see up-client-on-host); P2P binds to loopback instead of the Docker gateway
 cluster-start-on-host:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
-    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
-    if [ ! -f "${lc_bin}" ]; then
-        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    if [ ! -f "${hoprd_bin}" ]; then
-        echo "Error: hoprd not found at ${hoprd_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    p2p_host="127.0.0.1"
-    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
-    if [ "${cluster_state}" = "failed" ]; then
-        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
-        exit 1
-    fi
-    if [ "${cluster_state}" != "not_running" ]; then
-        current_host=$(just _cluster-p2p-host)
-        if [ "${current_host}" = "${p2p_host}" ]; then
-            pid=$(pgrep -f hoprd-localcluster | head -1)
-            echo "Cluster found in state '${cluster_state}' (PID ${pid}), already on P2P host ${p2p_host} — skipping start"
-            exit 0
-        fi
-        echo "Cluster is running with P2P host '${current_host}', but this recipe needs '${p2p_host}' — restarting with the correct host"
-        just cluster-stop
-    fi
-    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
-        "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
-        --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
-        --chain-image "{{CHAIN_IMAGE}}" \
-        --size        {{CLUSTER_SIZE}} \
-        --p2p-host    "${p2p_host}" \
-        --data-dir    "{{DATA_DIR}}" \
-        --extra-identities 1 &
-    echo "Localcluster PID: $! (P2P on ${p2p_host})"
+    just _cluster-start 127.0.0.1
 
 # Start localcluster reachable from other machines on the LAN (see up-on-network); P2P binds/announces LAN_IP
 cluster-start-on-network:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
-    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
-    if [ ! -f "${lc_bin}" ]; then
-        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    if [ ! -f "${hoprd_bin}" ]; then
-        echo "Error: hoprd not found at ${hoprd_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    p2p_host=$(just _lan-ip)
-    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
-    if [ "${cluster_state}" = "failed" ]; then
-        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
-        exit 1
-    fi
-    if [ "${cluster_state}" != "not_running" ]; then
-        current_host=$(just _cluster-p2p-host)
-        if [ "${current_host}" = "${p2p_host}" ]; then
-            pid=$(pgrep -f hoprd-localcluster | head -1)
-            echo "Cluster found in state '${cluster_state}' (PID ${pid}), already on P2P host ${p2p_host} — skipping start"
-            exit 0
-        fi
-        echo "Cluster is running with P2P host '${current_host}', but this recipe needs '${p2p_host}' — restarting with the correct host"
-        just cluster-stop
-    fi
-    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
-        "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
-        --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
-        --chain-image "{{CHAIN_IMAGE}}" \
-        --size        {{CLUSTER_SIZE}} \
-        --p2p-host    "${p2p_host}" \
-        --data-dir    "{{DATA_DIR}}" \
-        --extra-identities 1 &
-    echo "Localcluster PID: $! (P2P on ${p2p_host})"
+    just _cluster-start "$(just _lan-ip)"
 
 # Poll until cluster reaches state=running
 cluster-wait:
