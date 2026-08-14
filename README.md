@@ -196,11 +196,17 @@ the Docker gateway or loopback. `LAN_IP` is auto-detected from the default route
   `/tmp/gnosis_vpn-on-network`, plus a `chmod` to make it world-readable —
   `gnosis_vpn-worker` reads the identity file as an unprivileged user, so the
   bundle can't sit under a private home directory.
+- Steps to build the client with `cargo build --release` and copy the resulting
+  `gnosis_vpn-worker` binary into the worker user's home dir, `chown`ed to that
+  user — the worker binary has the same unprivileged-user-can't-reach-it problem
+  as the identity file above, since `target/release` sits under your home dir (a
+  nix build wouldn't need this, its result lives in the world-readable
+  `/nix/store`).
 - The manual `gnosis_vpn-root` invocation to run there
-  (`./result/bin/gnosis_vpn-root
-  --worker-binary ./result/bin/gnosis_vpn-worker`),
-  with the identity env vars and generated config/Blokli URL filled in, pointing
-  at the pulled bundle.
+  (`./target/release/gnosis_vpn-root --worker-binary
+  ${worker_home}/gnosis_vpn-worker --state-home ${worker_home}`),
+  with the identity/config/Blokli-URL/worker-user settings passed as CLI flags,
+  pointing at the pulled bundle.
 - The ports this host's firewall needs to allow inbound from the other machine —
   the same NixOS-firewall caveat as below applies, just against the LAN
   interface instead of the Docker bridge.
