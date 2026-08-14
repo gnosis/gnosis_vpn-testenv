@@ -17,6 +17,9 @@ DOCKER_NETWORK_GATEWAY := env_var_or_default("DOCKER_NETWORK_GATEWAY", "172.30.0
 # VPN server settings
 SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 
+# Override for _lan-ip's auto-detection (multi-NIC hosts, or when the default route is wrong)
+LAN_IP := env_var_or_default("LAN_IP", "")
+
 # Data directory for VictoriaMetrics on-disk storage
 METRICS_DATA_DIR := env_var_or_default("METRICS_DATA_DIR", "/tmp/hopr-metrics-data")
 
@@ -158,6 +161,43 @@ cluster-start-on-host:
         --extra-identities 1 &
     echo "Localcluster PID: $!"
 
+# Start localcluster reachable from other machines on the LAN (see up-on-network); P2P binds/announces LAN_IP
+cluster-start-on-network:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
+    if [ ! -f "${lc_bin}" ]; then
+        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    if [ ! -f "${hoprd_bin}" ]; then
+        echo "Error: hoprd not found at ${hoprd_bin}" >&2
+        echo "Run 'just build-cluster' to build it first" >&2
+        exit 1
+    fi
+    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
+    if [ "${cluster_state}" = "failed" ]; then
+        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
+        exit 1
+    fi
+    if [ "${cluster_state}" != "not_running" ]; then
+        pid=$(pgrep -f hoprd-localcluster | head -1)
+        echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
+        exit 0
+    fi
+    lan_ip=$(just _lan-ip)
+    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
+        "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
+        --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
+        --chain-image "{{CHAIN_IMAGE}}" \
+        --size        {{CLUSTER_SIZE}} \
+        --p2p-host    "${lan_ip}" \
+        --data-dir    "{{DATA_DIR}}" \
+        --extra-identities 1 &
+    echo "Localcluster PID: $! (P2P on ${lan_ip})"
+
 # Poll until cluster reaches state=running
 cluster-wait:
     #!/usr/bin/env bash
@@ -278,6 +318,15 @@ gen-config:
         echo "${extra}" | jq -r '.module_address' > "{{CONFIG_DIR}}/extra_id.module"
         echo "Saved extra identity artifacts to {{CONFIG_DIR}}"
     fi
+
+# Derive a LAN-reachable client config + blokli URL for a client running on another machine (see up-on-network)
+gen-config-on-network: gen-config
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lan_ip=$(just _lan-ip)
+    sed "s/127\.0\.0\.1/${lan_ip}/g" "{{CONFIG_DIR}}/client.toml" > "{{CONFIG_DIR}}/client-on-network.toml"
+    sed "s/localhost/${lan_ip}/"     "{{CONFIG_DIR}}/blokli_url"   > "{{CONFIG_DIR}}/blokli_url-on-network"
+    echo "Generated {{CONFIG_DIR}}/client-on-network.toml (exit server via ${lan_ip})"
 
 # ─── Client ──────────────────────────────────────────────────────────────────
 
@@ -462,6 +511,10 @@ up: build metrics-start cluster-start cluster-wait server-start gen-config clien
 up-client-on-host: build-cluster build-server build-client-native metrics-start cluster-start-on-host cluster-wait server-start gen-config client-start-on-host
     @just summary-host-client
 
+# Bring up a cluster + exit server reachable from another machine on the LAN, and generate its client config
+up-on-network: build-cluster build-server metrics-start cluster-start-on-network cluster-wait server-start gen-config-on-network
+    @just summary-on-network
+
 # Print how to control the running client and component versions
 summary:
     #!/usr/bin/env bash
@@ -501,6 +554,51 @@ summary-host-client:
     echo ""
     echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
     echo "─────────────────────────────────────────────────────────────────"
+
+# Print what to copy/run on the other machine, the required firewall ports, and component versions
+summary-on-network:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    lan_ip=$(just _lan-ip)
+    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url-on-network")
+    echo ""
+    echo "── Gnosis VPN test stack (reachable on the LAN at ${lan_ip}) ───"
+    echo ""
+    echo "On the other machine, from a gnosis_vpn-client checkout with a release build:"
+    echo "  1. Copy these files from this host:"
+    echo "       {{CONFIG_DIR}}/client-on-network.toml"
+    echo "       {{CONFIG_DIR}}/extra_id.id"
+    echo "       {{CONFIG_DIR}}/extra_id.password"
+    echo "  2. Run (paths below assume they land in the current directory):"
+    echo "       GNOSISVPN_HOPR_IDENTITY_FILE=extra_id.id \\"
+    echo "       GNOSISVPN_HOPR_IDENTITY_PASS=\"\$(cat extra_id.password)\" \\"
+    echo "       just run-local client-on-network.toml ${blokli_url}"
+    echo ""
+    echo "Make sure this host's firewall allows inbound from the other machine on:"
+    echo "  UDP 9000..$(({{CLUSTER_SIZE}} - 1 + 9000))   (HOPR P2P)"
+    echo "  TCP 8080                                     (Blokli)"
+    echo "  TCP 8000..$(({{SERVER_COUNT}} - 1 + 8000))   (VPN server API)"
+    echo "  UDP 51821..$(({{SERVER_COUNT}} - 1 + 51821)) (VPN server WireGuard)"
+    echo ""
+    echo "Component versions:"
+    just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
+    just _component-version "hoprd"             "{{HOPRD_DIR}}"
+    echo "─────────────────────────────────────────────────────────────────"
+
+# Resolve the LAN-reachable IP: LAN_IP override, or auto-detect via default route
+_lan-ip:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{LAN_IP}}" ]; then
+        echo "{{LAN_IP}}"
+        exit 0
+    fi
+    lan_ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p')
+    if [ -z "${lan_ip}" ]; then
+        echo "Error: could not auto-detect a LAN IP (no default route?) — set LAN_IP explicitly" >&2
+        exit 1
+    fi
+    echo "${lan_ip}"
 
 # Print <name>'s checked-out branch and commit, plus tag if HEAD is exactly tagged
 _component-version name dir:
