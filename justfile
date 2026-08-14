@@ -44,6 +44,9 @@ CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
 
+# Files a remote client needs, bundled together for up-on-network (see gen-config-on-network)
+NETWORK_BUNDLE_DIR := CONFIG_DIR + "/on-network"
+
 # List available recipes
 default:
     @just --list
@@ -343,7 +346,10 @@ gen-config-on-network: gen-config
     lan_ip=$(just _lan-ip)
     sed "s/127\.0\.0\.1/${lan_ip}/g" "{{CONFIG_DIR}}/client.toml" > "{{CONFIG_DIR}}/client-on-network.toml"
     sed "s/localhost/${lan_ip}/"     "{{CONFIG_DIR}}/blokli_url"   > "{{CONFIG_DIR}}/blokli_url-on-network"
+    mkdir -p "{{NETWORK_BUNDLE_DIR}}"
+    cp "{{CONFIG_DIR}}/client-on-network.toml" "{{CONFIG_DIR}}/extra_id.id" "{{CONFIG_DIR}}/extra_id.password" "{{NETWORK_BUNDLE_DIR}}/"
     echo "Generated {{CONFIG_DIR}}/client-on-network.toml (exit server via ${lan_ip})"
+    echo "Bundled remote-client files into {{NETWORK_BUNDLE_DIR}}"
 
 # ─── Client ──────────────────────────────────────────────────────────────────
 
@@ -577,19 +583,18 @@ summary-on-network:
     #!/usr/bin/env bash
     set -uo pipefail
     lan_ip=$(just _lan-ip)
+    remote_user=$(whoami)
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url-on-network")
     echo ""
     echo "── Gnosis VPN test stack (reachable on the LAN at ${lan_ip}) ───"
     echo ""
     echo "On the other machine, from a gnosis_vpn-client checkout with a release build:"
-    echo "  1. Copy these files from this host:"
-    echo "       {{CONFIG_DIR}}/client-on-network.toml"
-    echo "       {{CONFIG_DIR}}/extra_id.id"
-    echo "       {{CONFIG_DIR}}/extra_id.password"
-    echo "  2. Run (paths below assume they land in the current directory):"
-    echo "       GNOSISVPN_HOPR_IDENTITY_FILE=extra_id.id \\"
-    echo "       GNOSISVPN_HOPR_IDENTITY_PASS=\"\$(cat extra_id.password)\" \\"
-    echo "       just run-local client-on-network.toml ${blokli_url}"
+    echo "  1. Pull the bundled config/identity files from this host:"
+    echo "       rsync -avz ${remote_user}@${lan_ip}:{{NETWORK_BUNDLE_DIR}}/ ./on-network/"
+    echo "  2. Run:"
+    echo "       GNOSISVPN_HOPR_IDENTITY_FILE=on-network/extra_id.id \\"
+    echo "       GNOSISVPN_HOPR_IDENTITY_PASS=\"\$(cat on-network/extra_id.password)\" \\"
+    echo "       just run-local on-network/client-on-network.toml ${blokli_url}"
     echo ""
     echo "Make sure this host's firewall allows inbound from the other machine on:"
     echo "  UDP 9000..$(({{CLUSTER_SIZE}} - 1 + 9000))   (HOPR P2P)"
