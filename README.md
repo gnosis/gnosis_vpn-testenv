@@ -162,8 +162,11 @@ its own container" above) if `gnosis_vpn-server` shares the host's egress, and
 requires `CLIENT_WORKER_USER` to already exist as a system account
 (`gnosis_vpn-root` drops privileges to it by uid/gid when spawning the worker —
 its home directory doesn't matter). Don't run this alongside
-`client-start`/`cluster-start`; they'd fight over `CLIENT_STATE_DIR`, the
-default control socket, and the cluster's bound `--p2p-host`.
+`client-start`/`cluster-start` at the same time; they'd fight over
+`CLIENT_STATE_DIR` and the default control socket. (Switching _between_
+`cluster-start`/`cluster-start-on-host`/`cluster-start-on-network` sequentially
+is fine — each detects the running cluster's actual `--p2p-host` via `status`
+and transparently restarts it if it doesn't match what that recipe needs.)
 
 ## Running on the network (client on another machine)
 
