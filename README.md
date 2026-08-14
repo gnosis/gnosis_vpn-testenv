@@ -191,11 +191,16 @@ the Docker gateway or loopback. `LAN_IP` is auto-detected from the default route
 (`client-on-network.toml`, `extra_id.id`, `extra_id.password`) into
 `CONFIG_DIR/on-network/`. `up-on-network` finishes by printing:
 
-- An `rsync` command to run *from the other machine* that pulls
-  `CONFIG_DIR/on-network/` from this host over SSH.
-- The `just run-local` command (from `gnosis_vpn-client`'s justfile) to run
-  there, with the identity env vars and generated config/Blokli URL filled in,
-  pointing at the pulled `on-network/` folder.
+- An `rsync` command to run _from the other machine_ that pulls
+  `CONFIG_DIR/on-network/` from this host over SSH into
+  `/tmp/gnosis_vpn-on-network`, plus a `chmod` to make it world-readable —
+  `gnosis_vpn-worker` reads the identity file as an unprivileged user, so the
+  bundle can't sit under a private home directory.
+- The manual `gnosis_vpn-root` invocation to run there
+  (`./result/bin/gnosis_vpn-root
+  --worker-binary ./result/bin/gnosis_vpn-worker`),
+  with the identity env vars and generated config/Blokli URL filled in, pointing
+  at the pulled bundle.
 - The ports this host's firewall needs to allow inbound from the other machine —
   the same NixOS-firewall caveat as below applies, just against the LAN
   interface instead of the Docker bridge.
