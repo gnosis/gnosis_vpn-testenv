@@ -538,7 +538,6 @@ summary-on-network:
     echo "     world-readable location — gnosis_vpn-worker reads the identity"
     echo "     file as an unprivileged user, so it can't sit under your home dir:"
     echo "       rsync -avz ${remote_user}@${lan_ip}:{{NETWORK_BUNDLE_DIR}}/ ${bundle_dir}/"
-    echo "       chmod -R o+rX ${bundle_dir}"
     echo "  2. Make sure worker user '{{CLIENT_WORKER_USER}}' exists on that machine too"
     echo "     (gnosis_vpn-root drops privileges to it when spawning gnosis_vpn-worker)"
     echo "  3. The worker binary has the same problem as the identity file above —"
