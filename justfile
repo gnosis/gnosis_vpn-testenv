@@ -212,6 +212,13 @@ server-start:
             --sysctl net.ipv4.ip_forward=1 \
             --name "${name}" \
             gnosis_vpn-server
+        sleep 1
+        running=$(docker inspect "${name}" 2>/dev/null | jq -r '.[0].State.Running // "false"')
+        if [ "${running}" != "true" ]; then
+            echo "Error: ${name} failed to start" >&2
+            { docker logs "${name}" 2>&1 || true; } >&2
+            exit 1
+        fi
         echo "Started ${name} — WireGuard: ${wg_port}/udp, API: ${api_port}"
     done
 
@@ -307,6 +314,13 @@ client-start: network-create
         --volume "{{CONFIG_DIR}}:/config:ro" \
         --volume "{{CLIENT_STATE_DIR}}:/var/lib/gnosisvpn" \
         gnosis_vpn-client
+    sleep 1
+    running=$(docker inspect gnosis_vpn-client 2>/dev/null | jq -r '.[0].State.Running // "false"')
+    if [ "${running}" != "true" ]; then
+        echo "Error: gnosis_vpn-client failed to start" >&2
+        { docker logs gnosis_vpn-client 2>&1 || true; } >&2
+        exit 1
+    fi
     echo "Started gnosis_vpn-client"
 
 # Stop the client, wherever it's running (container or host-native — used by down)
