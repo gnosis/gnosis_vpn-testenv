@@ -17,6 +17,9 @@ DOCKER_NETWORK_GATEWAY := env_var_or_default("DOCKER_NETWORK_GATEWAY", "172.30.0
 # VPN server settings
 SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 
+# Override for _lan-ip's auto-detection (multi-NIC hosts, or when the default route is wrong)
+LAN_IP := env_var_or_default("LAN_IP", "")
+
 # Data directory for VictoriaMetrics on-disk storage
 METRICS_DATA_DIR := env_var_or_default("METRICS_DATA_DIR", "/tmp/hopr-metrics-data")
 
@@ -40,6 +43,9 @@ CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client
 # Generated config output dir
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
+
+# Files a remote client needs, bundled together for up-on-network (see gen-config-on-network)
+NETWORK_BUNDLE_DIR := CONFIG_DIR + "/on-network"
 
 # List available recipes
 default:
@@ -86,8 +92,8 @@ network-remove:
 
 # ─── Localcluster ────────────────────────────────────────────────────────────
 
-# Start localcluster (--extra-identities 1 pre-funds the client identity; P2P binds to the Docker gateway IP)
-cluster-start: network-create
+# Shared start/restart logic for the three cluster-start* variants below: binary checks, skip-if-already-running-on-this-host, restart-if-running-on-a-different-host, spawn.
+_cluster-start p2p_host:
     #!/usr/bin/env bash
     set -euo pipefail
     lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
@@ -102,61 +108,43 @@ cluster-start: network-create
         echo "Run 'just build-cluster' to build it first" >&2
         exit 1
     fi
+    p2p_host="{{p2p_host}}"
     cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
     if [ "${cluster_state}" = "failed" ]; then
         echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
         exit 1
     fi
     if [ "${cluster_state}" != "not_running" ]; then
-        pid=$(pgrep -f hoprd-localcluster | head -1)
-        echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
-        exit 0
+        current_host=$(just _cluster-p2p-host)
+        if [ "${current_host}" = "${p2p_host}" ]; then
+            pid=$(pgrep -f hoprd-localcluster | head -1)
+            echo "Cluster found in state '${cluster_state}' (PID ${pid}), already on P2P host ${p2p_host} — skipping start"
+            exit 0
+        fi
+        echo "Cluster is running with P2P host '${current_host}', but this recipe needs '${p2p_host}' — restarting with the correct host"
+        just cluster-stop
     fi
     RUST_LOG={{CLUSTER_LOG_LEVEL}} \
         "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
         --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
         --chain-image "{{CHAIN_IMAGE}}" \
         --size        {{CLUSTER_SIZE}} \
-        --p2p-host    {{DOCKER_NETWORK_GATEWAY}} \
+        --p2p-host    "${p2p_host}" \
         --data-dir    "{{DATA_DIR}}" \
         --extra-identities 1 &
-    echo "Localcluster PID: $!"
+    echo "Localcluster PID: $! (P2P on ${p2p_host})"
+
+# Start localcluster (--extra-identities 1 pre-funds the client identity; P2P binds to the Docker gateway IP)
+cluster-start: network-create
+    just _cluster-start {{DOCKER_NETWORK_GATEWAY}}
 
 # Start localcluster for a host-native client (see up-client-on-host); P2P binds to loopback instead of the Docker gateway
 cluster-start-on-host:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
-    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
-    if [ ! -f "${lc_bin}" ]; then
-        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    if [ ! -f "${hoprd_bin}" ]; then
-        echo "Error: hoprd not found at ${hoprd_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
-    if [ "${cluster_state}" = "failed" ]; then
-        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
-        exit 1
-    fi
-    if [ "${cluster_state}" != "not_running" ]; then
-        pid=$(pgrep -f hoprd-localcluster | head -1)
-        echo "Cluster found in state '${cluster_state}' (PID ${pid}) — skipping start"
-        exit 0
-    fi
-    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
-        "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
-        --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
-        --chain-image "{{CHAIN_IMAGE}}" \
-        --size        {{CLUSTER_SIZE}} \
-        --p2p-host    127.0.0.1 \
-        --data-dir    "{{DATA_DIR}}" \
-        --extra-identities 1 &
-    echo "Localcluster PID: $!"
+    just _cluster-start 127.0.0.1
+
+# Start localcluster reachable from other machines on the LAN (see up-on-network); P2P binds/announces LAN_IP
+cluster-start-on-network:
+    just _cluster-start "$(just _lan-ip)"
 
 # Poll until cluster reaches state=running
 cluster-wait:
@@ -224,6 +212,13 @@ server-start:
             --sysctl net.ipv4.ip_forward=1 \
             --name "${name}" \
             gnosis_vpn-server
+        sleep 1
+        running=$(docker inspect "${name}" 2>/dev/null | jq -r '.[0].State.Running // "false"')
+        if [ "${running}" != "true" ]; then
+            echo "Error: ${name} failed to start" >&2
+            { docker logs "${name}" 2>&1 || true; } >&2
+            exit 1
+        fi
         echo "Started ${name} — WireGuard: ${wg_port}/udp, API: ${api_port}"
     done
 
@@ -279,6 +274,18 @@ gen-config:
         echo "Saved extra identity artifacts to {{CONFIG_DIR}}"
     fi
 
+# Derive a LAN-reachable client config + blokli URL for a client running on another machine (see up-on-network)
+gen-config-on-network: gen-config
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lan_ip=$(just _lan-ip)
+    sed "s/127\.0\.0\.1/${lan_ip}/g" "{{CONFIG_DIR}}/client.toml" > "{{CONFIG_DIR}}/client-on-network.toml"
+    sed "s/localhost/${lan_ip}/"     "{{CONFIG_DIR}}/blokli_url"   > "{{CONFIG_DIR}}/blokli_url-on-network"
+    mkdir -p "{{NETWORK_BUNDLE_DIR}}"
+    cp "{{CONFIG_DIR}}/client-on-network.toml" "{{CONFIG_DIR}}/extra_id.id" "{{CONFIG_DIR}}/extra_id.password" "{{NETWORK_BUNDLE_DIR}}/"
+    echo "Generated {{CONFIG_DIR}}/client-on-network.toml (exit server via ${lan_ip})"
+    echo "Bundled remote-client files into {{NETWORK_BUNDLE_DIR}}"
+
 # ─── Client ──────────────────────────────────────────────────────────────────
 
 # Start the gnosis_vpn-client container (CAP_NET_ADMIN, no sudo needed — see README)
@@ -307,6 +314,13 @@ client-start: network-create
         --volume "{{CONFIG_DIR}}:/config:ro" \
         --volume "{{CLIENT_STATE_DIR}}:/var/lib/gnosisvpn" \
         gnosis_vpn-client
+    sleep 1
+    running=$(docker inspect gnosis_vpn-client 2>/dev/null | jq -r '.[0].State.Running // "false"')
+    if [ "${running}" != "true" ]; then
+        echo "Error: gnosis_vpn-client failed to start" >&2
+        { docker logs gnosis_vpn-client 2>&1 || true; } >&2
+        exit 1
+    fi
     echo "Started gnosis_vpn-client"
 
 # Stop the client, wherever it's running (container or host-native — used by down)
@@ -462,6 +476,10 @@ up: build metrics-start cluster-start cluster-wait server-start gen-config clien
 up-client-on-host: build-cluster build-server build-client-native metrics-start cluster-start-on-host cluster-wait server-start gen-config client-start-on-host
     @just summary-host-client
 
+# Bring up a cluster + exit server reachable from another machine on the LAN, and generate its client config
+up-on-network: build-cluster build-server metrics-start cluster-start-on-network cluster-wait server-start gen-config-on-network
+    @just summary-on-network
+
 # Print how to control the running client and component versions
 summary:
     #!/usr/bin/env bash
@@ -501,6 +519,90 @@ summary-host-client:
     echo ""
     echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
     echo "─────────────────────────────────────────────────────────────────"
+
+# Print what to copy/run on the other machine, the required firewall ports, and component versions
+summary-on-network:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    lan_ip=$(just _lan-ip)
+    remote_user=$(whoami)
+    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url-on-network")
+    bundle_dir="/tmp/gnosis_vpn-on-network"
+    worker_home="/home/{{CLIENT_WORKER_USER}}"
+    echo ""
+    echo "── Gnosis VPN test stack (reachable on the LAN at ${lan_ip}) ───"
+    echo ""
+    echo "On the other machine, from a gnosis_vpn-client checkout built with"
+    echo "'cargo build --release':"
+    echo "  1. Pull the bundled config/identity files from this host, into a"
+    echo "     world-readable location — gnosis_vpn-worker reads the identity"
+    echo "     file as an unprivileged user, so it can't sit under your home dir:"
+    echo "       rsync -avz ${remote_user}@${lan_ip}:{{NETWORK_BUNDLE_DIR}}/ ${bundle_dir}/"
+    echo "  2. Make sure worker user '{{CLIENT_WORKER_USER}}' exists on that machine too"
+    echo "     (gnosis_vpn-root drops privileges to it when spawning gnosis_vpn-worker)"
+    echo "  3. The worker binary has the same problem as the identity file above —"
+    echo "     target/release sits under your home dir, unreachable for the worker"
+    echo "     user (a nix build wouldn't need this, its result lives in the"
+    echo "     world-readable /nix/store). Copy it out and hand it to the worker user:"
+    echo "       sudo rm -f ${worker_home}/gnosis_vpn-worker"
+    echo "       sudo cp ./target/release/gnosis_vpn-worker ${worker_home}/"
+    echo "       sudo chown {{CLIENT_WORKER_USER}}:gnosisvpn ${worker_home}/gnosis_vpn-worker"
+    echo "  4. Run:"
+    echo "       sudo RUST_LOG=info \\"
+    echo "       ./target/release/gnosis_vpn-root \\"
+    echo "         --config-path ${bundle_dir}/client-on-network.toml \\"
+    echo "         --hopr-blokli-url \"${blokli_url}\" \\"
+    echo "         --hopr-identity-file ${bundle_dir}/extra_id.id \\"
+    echo "         --hopr-identity-pass \"\$(cat ${bundle_dir}/extra_id.password)\" \\"
+    echo "         --client-autostart 30min \\"
+    echo "         --worker-user {{CLIENT_WORKER_USER}} \\"
+    echo "         --state-home ${worker_home} \\"
+    echo "         --worker-binary ${worker_home}/gnosis_vpn-worker"
+    echo ""
+    echo "Make sure this host's firewall allows inbound from the other machine on:"
+    echo "  UDP 9000..$(({{CLUSTER_SIZE}} - 1 + 9000))   (HOPR P2P)"
+    echo "  TCP 8080                                     (Blokli)"
+    echo "  TCP 8000..$(({{SERVER_COUNT}} - 1 + 8000))   (VPN server API)"
+    echo "  UDP 51821..$(({{SERVER_COUNT}} - 1 + 51821)) (VPN server WireGuard)"
+    echo ""
+    echo "Component versions:"
+    just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
+    just _component-version "hoprd"             "{{HOPRD_DIR}}"
+    echo ""
+    echo "Metrics (on this host) — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+    echo "─────────────────────────────────────────────────────────────────"
+
+# Resolve the LAN-reachable IP: LAN_IP override, or auto-detect via default route
+_lan-ip:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Downstream recipes splice this into host:port strings and firewall rules, so it must be
+    # a plain IPv4 dotted-quad — a hostname or IPv6 address would silently produce invalid targets.
+    ipv4_pattern='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
+    if [ -n "{{LAN_IP}}" ]; then
+        if ! [[ "{{LAN_IP}}" =~ ${ipv4_pattern} ]]; then
+            echo "Error: LAN_IP='{{LAN_IP}}' is not an IPv4 dotted-quad (hostnames/IPv6 aren't supported)" >&2
+            exit 1
+        fi
+        echo "{{LAN_IP}}"
+        exit 0
+    fi
+    lan_ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p')
+    if [ -z "${lan_ip}" ]; then
+        echo "Error: could not auto-detect a LAN IP (no default route?) — set LAN_IP explicitly" >&2
+        exit 1
+    fi
+    echo "${lan_ip}"
+
+# The P2P host the currently running cluster (if any) was started with, or empty if not running.
+# hoprd-localcluster's status JSON reports each node's dial address (host:port) from the moment
+# it's created — deterministic from --p2p-host, so this reflects the real flag even before any
+# node is ready.
+_cluster-p2p-host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" status --data-dir "{{DATA_DIR}}" 2>/dev/null \
+        | jq -r '.nodes[0].p2p // empty' | sed -n 's/:[0-9]*$//p'
 
 # Print <name>'s checked-out branch and commit, plus tag if HEAD is exactly tagged
 _component-version name dir:
