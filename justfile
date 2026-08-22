@@ -303,6 +303,7 @@ client-start: network-create
         --name gnosis_vpn-client \
         --network "{{DOCKER_NETWORK}}" \
         --cap-add=NET_ADMIN \
+        --device /dev/net/tun \
         --add-host=host.docker.internal:host-gateway \
         --env RUST_LOG="{{CLIENT_LOG_LEVEL}}" \
         --env GNOSISVPN_CONFIG_PATH=/config/client.toml \
