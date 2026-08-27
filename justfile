@@ -40,6 +40,10 @@ CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpntestenv
 # Client log file path (host-native client only — the container relies on `docker logs` instead)
 CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client.log")
 
+# End-to-end browser test suite (see e2e/README.md)
+E2E_IMAGE   := env_var_or_default("E2E_IMAGE",   "gnosis_vpn-e2e")
+E2E_OUT_DIR := env_var_or_default("E2E_OUT_DIR", "/tmp/gnosis_vpn-testenv-e2e")
+
 # Generated config output dir
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
@@ -432,6 +436,26 @@ system-tests:
     SYSTEM_TEST_CONFIG=$(cat "{{CONFIG_DIR}}/client.toml") \
     SYSTEM_TEST_WORKER_BINARY="${worker_binary}" \
         just -d "{{GVPN_CLIENT_DIR}}" -f "{{GVPN_CLIENT_DIR}}/justfile" system-tests
+
+# ─── End-to-end tests ────────────────────────────────────────────────────────
+
+# Build the e2e sidecar image (node + obscura + browser harness)
+build-e2e:
+    docker build --tag "{{E2E_IMAGE}}" e2e
+
+# Drive a headless browser through the tunnel for every destination (see e2e/README.md)
+e2e *ARGS: build-e2e
+    #!/usr/bin/env bash
+    set -euo pipefail
+    E2E_IMAGE="{{E2E_IMAGE}}" \
+    E2E_OUT_DIR="{{E2E_OUT_DIR}}" \
+    CLUSTER_SIZE="{{CLUSTER_SIZE}}" \
+    SERVER_COUNT="{{SERVER_COUNT}}" \
+    HOPS="{{HOPS}}" \
+    GVPN_CLIENT_DIR="{{GVPN_CLIENT_DIR}}" \
+    GVPN_SERVER_DIR="{{GVPN_SERVER_DIR}}" \
+    HOPRD_DIR="{{HOPRD_DIR}}" \
+        "{{justfile_directory()}}/e2e/run.sh" {{ARGS}}
 
 # ─── Metrics ─────────────────────────────────────────────────────────────────
 
