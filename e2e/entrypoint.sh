@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Starts obscura's CDP server, then runs the harness against it. Both live in the
-# gnosis_vpn-client container's network namespace, so 127.0.0.1 is shared and all
-# browser traffic egresses through the tunnel.
+# Starts obscura's CDP server, then runs the harness against it. Both live in the gnosis_vpn-client container's network namespace, so 127.0.0.1 is shared and all browser traffic egresses through the tunnel.
 set -euo pipefail
 
 CDP_PORT="${CDP_PORT:-9222}"

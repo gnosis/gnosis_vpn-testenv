@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end browser tests against a live Gnosis VPN stack: for each destination,
-# connect, let the data path settle, drive the browser harness through the tunnel,
-# then disconnect. Aggregates every per-exit record into summary.csv at the end.
-#
-# Default mode drives the testenv's containerised client (`just up`) and runs the
-# browser in a sidecar sharing that container's network namespace. `--client-mode
-# host` instead talks to a client running natively on this host (rotsee, or
-# `just up-client-on-host`) and runs obscura on the host.
+# End-to-end browser tests against a live Gnosis VPN stack: for each destination, connect, let the data path settle, drive the browser harness through the tunnel, then disconnect. Aggregates every per-exit record into summary.csv at the end. Default mode drives the testenv's containerised client (`just up`) and runs the browser in a sidecar sharing that container's network namespace. `--client-mode host` instead talks to a client running natively on this host (rotsee, or `just up-client-on-host`) and runs obscura on the host.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,8 +9,7 @@ CLIENT_CONTAINER="${CLIENT_CONTAINER:-gnosis_vpn-client}"
 E2E_IMAGE="${E2E_IMAGE:-gnosis_vpn-e2e}"
 E2E_OUT_DIR="${E2E_OUT_DIR:-/tmp/gnosis_vpn-testenv-e2e}"
 SIDECAR_NAME="${SIDECAR_NAME:-gnosis_vpn-e2e-run}"
-# The wg peer address the client pings; testenv generates 10.129.0.1 from
-# templates/client.toml.tpl, rotsee uses 10.128.0.1.
+# The wg peer address the client pings; testenv generates 10.129.0.1 from templates/client.toml.tpl, rotsee uses 10.128.0.1.
 PING_TARGETS="${PING_TARGETS:-1.1.1.1,10.129.0.1}"
 SETTLE_SECS="${SETTLE_SECS:-10}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-150}"
@@ -97,9 +89,7 @@ if [ "$QUICK" -eq 1 ]; then
     export SPEEDTEST_RUNS="${SPEEDTEST_RUNS:-1}"
 fi
 
-# ---------------------------------------------------------------------------
-# Client control
-# ---------------------------------------------------------------------------
+# ─── Client control ────────────────────────────────────────────────────────────
 
 ctl() {
     case "$CLIENT_MODE" in
@@ -146,9 +136,7 @@ ensure_disconnected() {
     wait_for is_disconnected "$DISCONNECT_TIMEOUT" "disconnect"
 }
 
-# ---------------------------------------------------------------------------
-# Preflight
-# ---------------------------------------------------------------------------
+# ─── Preflight ─────────────────────────────────────────────────────────────────
 
 for cmd in jq curl; do
     command -v "$cmd" >/dev/null 2>&1 || {
@@ -193,9 +181,7 @@ if [ ${#EXITS[@]} -eq 0 ]; then
     exit 2
 fi
 
-# ---------------------------------------------------------------------------
-# Run setup
-# ---------------------------------------------------------------------------
+# ─── Run setup ─────────────────────────────────────────────────────────────────
 
 # Drawn once per run so every exit is compared on the same video.
 YT_VIDEO_INDEX="${YT_VIDEO_INDEX:-$RANDOM}"
@@ -264,9 +250,7 @@ jq -n \
      }' >"$OUTDIR/meta.json"
 echo "== wrote meta.json (baseline egress: $BASELINE_TRACE) =="
 
-# ---------------------------------------------------------------------------
-# Per-exit loop
-# ---------------------------------------------------------------------------
+# ─── Per-exit loop ─────────────────────────────────────────────────────────────
 
 # drive_harness <exit> -> runs the browser harness, writing <OUTDIR>/<exit>.json
 drive_harness() {
@@ -325,8 +309,7 @@ for EXIT_ID in "${EXITS[@]}"; do
     echo "-- connected; settling ${SETTLE_SECS}s before measuring"
     sleep "$SETTLE_SECS"
 
-    # Recorded as metadata only. In testenv every exit NATs through this host, so
-    # loc carries no signal and is never used to skip a destination.
+    # Recorded as metadata only. In testenv every exit NATs through this host, so loc carries no signal and is never used to skip a destination.
     TRACE="$(curl -s --max-time 20 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|loc|colo)=' | tr '\n' ' ')"
     echo "-- host egress trace: ${TRACE:-none}"
 

@@ -1,10 +1,4 @@
-// Per-exit e2e driver. Drives obscura (CDP) to browse real sites and run
-// an in-page Cloudflare-endpoint speedtest, samples ICMP latency in parallel,
-// and writes <OUTDIR>/<EXIT>.json.
-//
-// Env: EXIT, OUTDIR, EXPECTED_CC, CDP (default ws://127.0.0.1:9222/devtools/browser)
-//      NAV_TIMEOUT_MS, DOWNLOAD_SECS, UPLOAD_SECS, DWELL_MS, CRAWL_START, CRAWL_HOPS,
-//      PING_TARGETS, SPEEDTEST_RUNS
+// Per-exit e2e driver. Drives obscura (CDP) to browse real sites and run an in-page Cloudflare-endpoint speedtest, samples ICMP latency in parallel, and writes <OUTDIR>/<EXIT>.json. Env: EXIT, OUTDIR, EXPECTED_CC, CDP (default ws://127.0.0.1:9222/devtools/browser) NAV_TIMEOUT_MS, DOWNLOAD_SECS, UPLOAD_SECS, DWELL_MS, CRAWL_START, CRAWL_HOPS, PING_TARGETS, SPEEDTEST_RUNS
 import puppeteer from "puppeteer-core";
 import { readFileSync, writeFileSync } from "fs";
 import { spawn } from "child_process";
@@ -25,24 +19,19 @@ const SPEEDTEST_LABELS = Array.from(
   { length: Math.max(1, +(process.env.SPEEDTEST_RUNS || 2)) },
   (_, i) => `run${i + 1}`,
 );
-// Sampled for the whole exit window. The second entry is the tunnel gateway, which
-// differs per environment (rotsee 10.128.0.1, testenv 10.129.0.1 — the wg peer
-// address from [connection.ping] in the generated client.toml).
+// Sampled for the whole exit window. The second entry is the tunnel gateway, which differs per environment (rotsee 10.128.0.1, testenv 10.129.0.1 — the wg peer address from [connection.ping] in the generated client.toml).
 const PING_TARGETS = (process.env.PING_TARGETS || "1.1.1.1,10.128.0.1")
   .split(",")
   .map((t) => t.trim())
   .filter(Boolean);
 
-// A video is drawn per run so one edge-cached asset can't define the numbers.
-// max_res is the upload's native ceiling; what the player actually settled on is
-// recorded per run (probe below), which is the number that reflects the tunnel.
+// A video is drawn per run so one edge-cached asset can't define the numbers. max_res is the upload's native ceiling; what the player actually settled on is recorded per run (probe below), which is the number that reflects the tunnel.
 const YT_VIDEOS = [
   { id: "aqz-KE-bpKQ", name: "big-buck-bunny-60fps", max_res: "2160p" },
   { id: "LXb3EKWsInQ", name: "costa-rica-60fps-hdr", max_res: "2160p" },
   { id: "jNQXAC9IVRw", name: "me-at-the-zoo", max_res: "240p" },
 ];
-// run.sh draws the index once so every exit in a run watches the same video —
-// otherwise the per-exit numbers compare a 4K upload against a 240p one.
+// run.sh draws the index once so every exit in a run watches the same video — otherwise the per-exit numbers compare a 4K upload against a 240p one.
 const YT_INDEX = Number.isInteger(+process.env.YT_VIDEO_INDEX)
   ? +process.env.YT_VIDEO_INDEX
   : Math.floor(Math.random() * YT_VIDEOS.length);
@@ -111,9 +100,7 @@ function parsePing(out, target) {
 }
 
 // ---- in-page speedtest against Cloudflare endpoints (browser traffic) ----
-// obscura caps every CDP Runtime.callFunctionOn (page.evaluate) at ~30s, so the
-// measurement is orchestrated from Node in short sub-30s calls. Chunk size adapts
-// to the observed rate to target ~8s per call regardless of tunnel bandwidth.
+// obscura caps every CDP Runtime.callFunctionOn (page.evaluate) at ~30s, so the measurement is orchestrated from Node in short sub-30s calls. Chunk size adapts to the observed rate to target ~8s per call regardless of tunnel bandwidth.
 const CLAMP = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 async function measureLatency(page) {
@@ -202,8 +189,7 @@ async function measureDownload(page, secs) {
       return { error: String(e).split("\n")[0] };
   }
   const elapsed = (Date.now() - t0) / 1000;
-  // Nothing moved: report it as a failure rather than a credible 0 Mbps, which
-  // would enter summary.csv as a real datapoint and skew a before/after diff.
+  // Nothing moved: report it as a failure rather than a credible 0 Mbps, which would enter summary.csv as a real datapoint and skew a before/after diff.
   if (!totalBytes)
     return {
       error: "no bytes transferred",
@@ -331,8 +317,7 @@ async function visit(page, site) {
   const rec = { label: site.label, url: site.url, at: nowISO() };
   const t0 = Date.now();
   try {
-    // DOMContentLoaded = "page usable" over the capped tunnel; some sites (e.g. cnn)
-    // resolve with no HTTP status object but still render — success = goto did not throw.
+    // DOMContentLoaded = "page usable" over the capped tunnel; some sites (e.g. cnn) resolve with no HTTP status object but still render — success = goto did not throw.
     const resp = await page.goto(site.url, {
       waitUntil: "domcontentloaded",
       timeout: NAV_TIMEOUT_MS,
@@ -348,8 +333,7 @@ async function visit(page, site) {
     if (site.video) {
       rec.video = { ...site.video };
       try {
-        // Autoplay is blocked, so nudge it: muted playback is the only kind a
-        // headless browser will start unprompted.
+        // Autoplay is blocked, so nudge it: muted playback is the only kind a headless browser will start unprompted.
         await page.evaluate(async () => {
           const v = document.querySelector("video");
           if (v) {
@@ -408,9 +392,7 @@ async function visit(page, site) {
 }
 
 // ---- link crawl on a light site ----
-// One-shot loads of heavy pages measure asset weight; following links measures how
-// fast you can actually move around behind the tunnel. Wikipedia: small pages,
-// stable markup, no DRM or bot wall.
+// One-shot loads of heavy pages measure asset weight; following links measures how fast you can actually move around behind the tunnel. Wikipedia: small pages, stable markup, no DRM or bot wall.
 async function crawl(page, startUrl, hops) {
   const out = [];
   let url = startUrl;
@@ -430,9 +412,7 @@ async function crawl(page, startUrl, hops) {
       try {
         rec.title = await page.title();
       } catch {}
-      // Article-body links come back as absolute URLs, not /wiki/ paths, so resolve
-      // every href and keep same-origin main-namespace articles (a ":" means
-      // Help:/Category:/File:, which are chrome rather than reading material).
+      // Article-body links come back as absolute URLs, not /wiki/ paths, so resolve every href and keep same-origin main-namespace articles (a ":" means Help:/Category:/File:, which are chrome rather than reading material).
       const next = await page.evaluate(
         (visited) => {
           const seen = new Set(visited);
@@ -461,8 +441,7 @@ async function crawl(page, startUrl, hops) {
         [...out.map((h) => h.resolved_url), rec.resolved_url].filter(Boolean),
       );
       out.push(rec);
-      // A dead end shouldn't cut the walk short: re-seed from a random article so
-      // the run still reports the hop count it was asked for.
+      // A dead end shouldn't cut the walk short: re-seed from a random article so the run still reports the hop count it was asked for.
       url = next || startUrl;
     } catch (e) {
       rec.ms = Date.now() - t0;

@@ -1,10 +1,7 @@
-# Sidecar image for the e2e browser harness. Run it with
-# `--network container:gnosis_vpn-client` so obscura and ping sit inside the
-# client's network namespace, where the full-tunnel WireGuard routes live.
+# Sidecar image for the e2e browser harness. Run it with `--network container:gnosis_vpn-client` so obscura and ping sit inside the client's network namespace, where the full-tunnel WireGuard routes live.
 FROM node:22-bookworm-slim
 
-# obscura is not in any package repo, so it comes from the upstream release,
-# pinned per architecture (same version/hashes the nix package used).
+# obscura is not in any package repo, so it comes from the upstream release, pinned per architecture (same version/hashes the nix package used).
 ARG OBSCURA_VERSION=0.2.1
 ARG TARGETARCH
 

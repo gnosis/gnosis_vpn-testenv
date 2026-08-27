@@ -2,8 +2,7 @@
 import { readFileSync, writeFileSync, readdirSync } from "fs";
 
 const OUTDIR = process.env.OUTDIR || ".";
-// Only the per-exit records: the same directory also holds meta.json and the
-// <EXIT>.nerdstats.json snapshots, which would otherwise land as blank rows.
+// Only the per-exit records: the same directory also holds meta.json and the <EXIT>.nerdstats.json snapshots, which would otherwise land as blank rows.
 const files = readdirSync(OUTDIR).filter(
   (f) =>
     f.endsWith(".json") && f !== "meta.json" && !f.endsWith(".nerdstats.json"),
@@ -48,8 +47,7 @@ for (const f of files) {
   );
   const st = j.speedtests || [];
   const p1111 = (j.ping || []).find((p) => p.target === "1.1.1.1") || {};
-  // Whichever ping target isn't the public one is the tunnel gateway — its address
-  // is environment-specific (rotsee 10.128.0.1, testenv 10.129.0.1).
+  // Whichever ping target isn't the public one is the tunnel gateway — its address is environment-specific (rotsee 10.128.0.1, testenv 10.129.0.1).
   const pgw = (j.ping || []).find((p) => p.target !== "1.1.1.1") || {};
   const hops = j.crawl || [];
   const hopsOk = hops.filter((h) => h.outcome === "ok");
@@ -92,8 +90,7 @@ if (order.length)
 const csv = [cols.join(",")]
   .concat(rows.map((r) => cols.map((c) => r[c]).join(",")))
   .join("\n");
-// The file is what before/after runs get diffed against, so it stays; stdout is for
-// eyeballing the run as it finishes and for piping straight into another tool.
+// The file is what before/after runs get diffed against, so it stays; stdout is for eyeballing the run as it finishes and for piping straight into another tool.
 writeFileSync(`${OUTDIR}/summary.csv`, csv + "\n");
 console.log(`wrote ${OUTDIR}/summary.csv (${rows.length} exits)\n`);
 
