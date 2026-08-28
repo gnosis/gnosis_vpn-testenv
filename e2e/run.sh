@@ -12,6 +12,8 @@ SIDECAR_NAME="${SIDECAR_NAME:-gnosis_vpn-e2e-run}"
 # The wg peer address the client pings; testenv generates 10.129.0.1 from templates/client.toml.tpl, rotsee uses 10.128.0.1.
 PING_TARGETS="${PING_TARGETS:-1.1.1.1,10.129.0.1}"
 SETTLE_SECS="${SETTLE_SECS:-10}"
+WORKER_KEEPALIVE="${WORKER_KEEPALIVE:-2h}"
+WORKER_START_TRIES="${WORKER_START_TRIES:-24}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-150}"
 DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-60}"
 COOLDOWN_SECS="${COOLDOWN_SECS:-5}"
@@ -115,6 +117,7 @@ is_disconnected() {
         .Status
         | (.connected | not)
           and (.connecting | not)
+          and (.reconnecting | not)
           and ((.disconnecting | if type == "array" then length == 0 else not end))
     ' >/dev/null
 }
@@ -170,11 +173,25 @@ if ! ctl_json status | jq -e '.Status' >/dev/null; then
     exit 2
 fi
 
+# The worker returns to idle mode once its keep-alive expires (GNOSISVPN_CLIENT_AUTOSTART),
+# which leaves the socket answering but run_mode "NotRunning" and every route_health null.
+if ctl_json status | jq -e '.Status.run_mode == "NotRunning"' >/dev/null; then
+    echo "-- worker idle; starting client (keep-alive ${WORKER_KEEPALIVE})"
+    ctl start-client "$WORKER_KEEPALIVE" >/dev/null || {
+        echo "failed to start the client worker" >&2
+        exit 2
+    }
+    for _ in $(seq 1 "$WORKER_START_TRIES"); do
+        ctl_json status | jq -e '.Status.run_mode | objects | has("Running")' >/dev/null && break
+        sleep 5
+    done
+fi
+
 if [ ${#EXITS[@]} -eq 0 ]; then
     # not mapfile: macOS ships bash 3.2
     while IFS= read -r dest_id; do
         [ -n "$dest_id" ] && EXITS+=("$dest_id")
-    done < <(ctl_json status | jq -r '.Status.destinations[].id')
+    done < <(ctl_json status | jq -r '.Status.destinations[].destination.id')
 fi
 if [ ${#EXITS[@]} -eq 0 ]; then
     echo "no destinations configured on the client" >&2

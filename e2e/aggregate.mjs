@@ -55,7 +55,7 @@ for (const f of files) {
   rows.push({
     exit: j.exit,
     egress_loc: j.egress?.loc ?? "",
-    egress_match: j.egress_match,
+    egress_match: j.egress_match ?? "",
     colo: j.egress?.colo ?? "",
     nav_ok: ok.length,
     nav_total: navs.length,
