@@ -11,13 +11,30 @@ E2E_OUT_DIR="${E2E_OUT_DIR:-/tmp/gnosis_vpn-testenv-e2e}"
 SIDECAR_NAME="${SIDECAR_NAME:-gnosis_vpn-e2e-run}"
 # The wg peer address the client pings; testenv generates 10.129.0.1 from templates/client.toml.tpl, rotsee uses 10.128.0.1.
 PING_TARGETS="${PING_TARGETS:-1.1.1.1,10.129.0.1}"
-SETTLE_SECS="${SETTLE_SECS:-10}"
+SETTLE_SECS="${SETTLE_SECS:-15}"
+DEST_READY_TIMEOUT="${DEST_READY_TIMEOUT:-180}"
 WORKER_KEEPALIVE="${WORKER_KEEPALIVE:-2h}"
 WORKER_START_TRIES="${WORKER_START_TRIES:-24}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-150}"
 DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-60}"
 COOLDOWN_SECS="${COOLDOWN_SECS:-5}"
 QUICK=0
+
+# spawn mode only: the suite starts (and stops) gnosis_vpn-root itself, mirroring how
+# gnosis_vpn-system_tests owns its daemon rather than attaching to a pre-running one.
+GVPN_ROOT_BIN="${GVPN_ROOT_BIN:-}"
+GVPN_WORKER_BIN="${GVPN_WORKER_BIN:-}"
+GVPN_CONFIG="${GVPN_CONFIG:-}"
+GVPN_IDENTITY_FILE="${GVPN_IDENTITY_FILE:-}"
+GVPN_IDENTITY_PASS="${GVPN_IDENTITY_PASS:-}"
+GVPN_IDENTITY_SAFE="${GVPN_IDENTITY_SAFE:-}"
+GVPN_BLOKLI_URL="${GVPN_BLOKLI_URL:-}"
+WORKER_USER="${WORKER_USER:-gnosisvpn-dev}"
+SPAWN_HOME="${SPAWN_HOME:-/tmp/gnosis_vpn-e2e-home}"
+SPAWN_LOG="${SPAWN_LOG:-/tmp/gnosis_vpn-e2e-daemon.log}"
+SPAWN_READY_TRIES="${SPAWN_READY_TRIES:-150}"   # x2s; a real network takes longer to reach Running than a localcluster
+SPAWNED_DAEMON=0
+SUDO_KEEPALIVE_PID=""
 
 # host mode only
 GVPN_CTL="${GVPN_CTL:-gnosis_vpn-ctl}"
@@ -77,7 +94,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$CLIENT_MODE" in
-container | host) ;;
+container | host | spawn) ;;
 *)
     echo "--client-mode must be 'container' or 'host'" >&2
     exit 2
@@ -96,7 +113,7 @@ fi
 ctl() {
     case "$CLIENT_MODE" in
     container) docker exec "$CLIENT_CONTAINER" gnosis_vpn-ctl "$@" ;;
-    host)
+    host | spawn)
         if [ -n "$SOCKET_PATH" ]; then
             "$GVPN_CTL" -s "$SOCKET_PATH" "$@"
         else
@@ -168,6 +185,93 @@ else
     }
 fi
 
+# spawn_daemon -> starts gnosis_vpn-root under sudo and waits for its control socket.
+# gnosis_vpn-root needs root for the WireGuard interface and routing table, exactly as
+# gnosis_vpn-system_tests does; sudo -v first so a long run does not hit a prompt later.
+spawn_daemon() {
+    local missing=""
+    for v in GVPN_ROOT_BIN GVPN_WORKER_BIN GVPN_CONFIG GVPN_IDENTITY_FILE GVPN_IDENTITY_PASS GVPN_BLOKLI_URL; do
+        [ -z "$(eval printf '%s' "\$$v")" ] && missing="$missing $v"
+    done
+    if [ -n "$missing" ]; then
+        echo "--client-mode spawn needs:$missing" >&2
+        exit 2
+    fi
+    id "$WORKER_USER" >/dev/null 2>&1 || {
+        echo "worker user '$WORKER_USER' does not exist (set WORKER_USER); gnosis_vpn-root drops privileges to it" >&2
+        exit 2
+    }
+
+    sudo -v
+    # A tour outlives sudo's 5-minute timestamp, so teardown would re-prompt for a password
+    # long after the terminal moved on. Refresh it in the background until cleanup stops us.
+    (while :; do
+        sudo -n -v 2>/dev/null || exit
+        sleep 60
+    done) &
+    SUDO_KEEPALIVE_PID=$!
+
+    # gnosis_vpn-worker runs as WORKER_USER and needs the identity in a directory it owns —
+    # a world-readable copy is not enough, it writes alongside the keypair. system-tests does
+    # the same thing (identity into ${worker_home}/.config, chowned to the worker user).
+    local identity_path="$SPAWN_HOME/.config/gnosisvpn-hopr.id"
+    sudo mkdir -p "$SPAWN_HOME/.config"
+    sudo cp "$GVPN_IDENTITY_FILE" "$identity_path"
+    # The safe/pass sidecars must travel with the identity: without the .safe the client cannot
+    # find its existing safe association and onboards a brand new (unfunded) one instead —
+    # run_mode sits in PreparingSafe forever. system-tests stages all three for this reason.
+    [ -n "$GVPN_IDENTITY_SAFE" ] && sudo cp "$GVPN_IDENTITY_SAFE" "$SPAWN_HOME/.config/gnosisvpn-hopr.safe"
+    printf %s "$GVPN_IDENTITY_PASS" | sudo tee "$SPAWN_HOME/.config/gnosisvpn-hopr.pass" >/dev/null
+    sudo chown -R "$WORKER_USER" "$SPAWN_HOME"
+    sudo chmod 0700 "$SPAWN_HOME/.config"
+    sudo chmod 0600 "$identity_path"
+
+    echo "-- spawning gnosis_vpn-root (worker user $WORKER_USER, log $SPAWN_LOG)"
+    sudo RUST_LOG="${DAEMON_LOG_LEVEL:-info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug}" \
+        GNOSISVPN_HOME="$SPAWN_HOME" \
+        "$GVPN_ROOT_BIN" \
+        --config-path "$GVPN_CONFIG" \
+        --hopr-blokli-url "$GVPN_BLOKLI_URL" \
+        --worker-binary "$GVPN_WORKER_BIN" \
+        --worker-user "$WORKER_USER" \
+        --allow-insecure \
+        --client-autostart 4h \
+        --log-file "$SPAWN_LOG" \
+        --hopr-identity-file "$identity_path" \
+        --hopr-identity-pass "$GVPN_IDENTITY_PASS" &
+    SPAWNED_DAEMON=1
+
+    # The socket answers while run_mode is still Init, so waiting on it alone starts the tour
+    # against a client that has not finished coming up. Wait for Running.
+    local i=0
+    while [ "$i" -lt "$SPAWN_READY_TRIES" ]; do
+        if ctl_json status 2>/dev/null | jq -e '.Status.run_mode | objects | has("Running")' >/dev/null 2>&1; then
+            echo "-- daemon up (run_mode Running)"
+            return 0
+        fi
+        sleep 2
+        i=$((i + 1))
+    done
+    echo "daemon did not expose its control socket within $((SPAWN_READY_TRIES * 2))s (see $SPAWN_LOG)" >&2
+    exit 2
+}
+
+# Container mode gets its node deps baked in by the Dockerfile; host/spawn drive the harness
+# straight off this checkout, so they need node_modules present locally.
+if [ "$CLIENT_MODE" != "container" ] && [ ! -d "$HERE/node_modules" ]; then
+    command -v npm >/dev/null 2>&1 || {
+        echo "npm not found — needed to install the harness deps for ${CLIENT_MODE} mode (try: nix develop)" >&2
+        exit 2
+    }
+    echo "-- installing harness node deps (npm ci)"
+    (cd "$HERE" && npm ci --omit=dev) || {
+        echo "npm ci failed in $HERE" >&2
+        exit 2
+    }
+fi
+
+[ "$CLIENT_MODE" = "spawn" ] && spawn_daemon
+
 if ! ctl_json status | jq -e '.Status' >/dev/null; then
     echo "cannot reach the client's control socket via ${CLIENT_MODE} mode" >&2
     exit 2
@@ -216,11 +320,19 @@ cleanup() {
     [ "$CLIENT_MODE" = "container" ] && docker rm -f "$SIDECAR_NAME" >/dev/null 2>&1
     [ -n "$STARTED_OBSCURA" ] && kill "$STARTED_OBSCURA" 2>/dev/null
     ctl disconnect >/dev/null 2>&1
+    # We started the daemon, so we stop it — leaving a full-tunnel client running would
+    # keep capturing this machine's traffic after the suite exits.
+    if [ "$SPAWNED_DAEMON" -eq 1 ]; then
+        echo "-- stopping spawned gnosis_vpn-root"
+        [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null
+        sudo pkill -f "$(basename "$GVPN_ROOT_BIN")" 2>/dev/null || true
+        sudo pkill -f "$(basename "$GVPN_WORKER_BIN")" 2>/dev/null || true
+    fi
     exit "$rc"
 }
 trap cleanup EXIT INT TERM
 
-if [ "$CLIENT_MODE" = "host" ]; then
+if [ "$CLIENT_MODE" != "container" ]; then
     if ! curl -sf --max-time 3 "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then
         echo "== starting obscura serve =="
         "$OBSCURA" serve --port "$CDP_PORT" --stealth >"$OUTDIR/obscura-serve.log" 2>&1 &
@@ -297,6 +409,19 @@ drive_harness() {
     fi
 }
 
+# run_harness <exit> -> drives the browser, keeping its output and guaranteeing a record.
+# Without this a harness crash left no <exit>.json at all, so the run aggregated to an empty
+# summary with nothing explaining why.
+run_harness() {
+    local exit_id="$1" rc=0
+    drive_harness "$exit_id" 2>&1 | tee "$OUTDIR/$exit_id.harness.log"
+    rc="${PIPESTATUS[0]}"
+    if [ ! -f "$OUTDIR/$exit_id.json" ]; then
+        echo "!! harness produced no record for $exit_id (exit $rc); see $exit_id.harness.log"
+        fatal_record "$exit_id" "harness failed (exit $rc) — see $exit_id.harness.log"
+    fi
+}
+
 # fatal_record <exit> <reason> -> the per-exit JSON aggregate.mjs expects when a run never started
 fatal_record() {
     jq -n --arg exit "$1" --arg err "$2" '{exit: $exit, fatal_error: $err}' >"$OUTDIR/$1.json"
@@ -309,6 +434,36 @@ for EXIT_ID in "${EXITS[@]}"; do
     echo "======================================================================"
 
     ensure_disconnected
+
+    # Skip fast instead of burning CONNECT_TIMEOUT: route_health already knows when a
+    # destination cannot be dialled (NeedsChannel with too few relays, Unrecoverable/NotAllowed
+    # for a hop count the network refuses, NeedsPeering while the client is still warming up).
+    # NeedsPeering/NoHealth are warm-up states, not verdicts — poll until the destination is
+    # dialable (or clearly is not) rather than skipping the moment the client is still settling.
+    rh_waited=0
+    while :; do
+        rh_state="$(ctl_json status | jq -r --arg id "$EXIT_ID" '
+            .Status.destinations[] | select(.destination.id == $id)
+            | .route_health.state.state // .route_health.state // "unknown"')"
+        case "$rh_state" in
+        ReadyToConnect | Connecting | Routable) break ;;
+        esac
+        [ "$rh_waited" -ge "$DEST_READY_TIMEOUT" ] && break
+        [ "$rh_waited" -eq 0 ] && echo "-- waiting up to ${DEST_READY_TIMEOUT}s for $EXIT_ID to become dialable (state: $rh_state)"
+        sleep 5
+        rh_waited=$((rh_waited + 5))
+    done
+    rh_reason="$(ctl_json status | jq -r --arg id "$EXIT_ID" '
+        .Status.destinations[] | select(.destination.id == $id)
+        | .route_health.state.reason // .route_health.last_error // ""')"
+    case "$rh_state" in
+    ReadyToConnect | Connecting | Routable) ;;
+    *)
+        echo "!! $EXIT_ID not connectable (state: $rh_state${rh_reason:+, reason: $rh_reason}) — skipping"
+        fatal_record "$EXIT_ID" "not connectable (state: $rh_state${rh_reason:+, reason: $rh_reason})"
+        continue
+        ;;
+    esac
 
     echo "-- connect $EXIT_ID"
     if ! ctl connect "$EXIT_ID"; then
@@ -323,7 +478,9 @@ for EXIT_ID in "${EXITS[@]}"; do
         continue
     fi
 
-    echo "-- connected; settling ${SETTLE_SECS}s before measuring"
+    # The tunnel is up before it is usable: SURBs still have to reach the exit, so probing
+    # immediately measures a starved path (or fails outright). Wait before any browsing/speedtest.
+    echo "-- connected; settling ${SETTLE_SECS}s for SURBs to reach the exit"
     sleep "$SETTLE_SECS"
 
     # Recorded as metadata only. In testenv every exit NATs through this host, so loc carries no signal and is never used to skip a destination.
@@ -332,7 +489,7 @@ for EXIT_ID in "${EXITS[@]}"; do
 
     ctl_json nerd-stats >"$OUTDIR/$EXIT_ID.nerdstats.json" || true
 
-    drive_harness "$EXIT_ID"
+    run_harness "$EXIT_ID"
 
     echo "-- disconnect $EXIT_ID"
     ctl disconnect >/dev/null 2>&1

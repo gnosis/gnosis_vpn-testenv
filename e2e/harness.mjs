@@ -54,6 +54,14 @@ const SITES = [
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// "http_errors=2 [403 doubleclick.net, 404 i.ytimg.com]" reads at a glance; a bare count does not.
+// De-duplicated because one broken asset class usually repeats many times over.
+const summarise = (items, fmt, max = 3) => {
+  if (!items?.length) return "";
+  const seen = [...new Set(items.map(fmt))];
+  const shown = seen.slice(0, max).join(", ");
+  return ` [${shown}${seen.length > max ? `, +${seen.length - max} more` : ""}]`;
+};
 const nowISO = () => new Date().toISOString();
 
 // ---- ICMP latency sampler (through the tunnel, full-tunnel routing) ----
@@ -306,11 +314,30 @@ async function egressCheck(page) {
 async function visit(page, site) {
   let failedResponses = 0,
     requestFailures = 0;
-  const onResp = (resp) => {
-    if (resp.status() >= 400) failedResponses++;
+  // Keep what actually broke, not just how many: a bare count cannot tell an ad beacon 403
+  // apart from the page's own assets being dropped by a starved tunnel.
+  const httpErrors = [];
+  const dropped = [];
+  const briefly = (u) => {
+    try {
+      return new URL(u).host;
+    } catch {
+      return String(u).slice(0, 60);
+    }
   };
-  const onFail = () => {
+  const onResp = (resp) => {
+    if (resp.status() >= 400) {
+      failedResponses++;
+      if (httpErrors.length < 10)
+        httpErrors.push({ status: resp.status(), url: resp.url(), host: briefly(resp.url()) });
+    }
+  };
+  const onFail = (req) => {
     requestFailures++;
+    if (dropped.length < 10) {
+      const reason = req?.failure?.()?.errorText ?? "unknown";
+      dropped.push({ reason, url: req?.url?.(), host: briefly(req?.url?.()) });
+    }
   };
   page.on("response", onResp);
   page.on("requestfailed", onFail);
@@ -386,6 +413,8 @@ async function visit(page, site) {
   }
   rec.failed_responses = failedResponses;
   rec.request_failures = requestFailures;
+  rec.http_errors = httpErrors;
+  rec.dropped_requests = dropped;
   page.off("response", onResp);
   page.off("requestfailed", onFail);
   return rec;
@@ -473,9 +502,13 @@ const result = {
 
 const pings = PING_TARGETS.map(startPing);
 
-const browser = await puppeteer.connect({ browserWSEndpoint: CDP });
-const page = await browser.newPage();
+// Connecting is itself failure-prone (obscura not up, CDP endpoint wrong). Keep it inside the
+// guarded region so a failure lands in <EXIT>.json as fatal_error instead of exiting silently.
+let browser;
+let page;
 try {
+  browser = await puppeteer.connect({ browserWSEndpoint: CDP });
+  page = await browser.newPage();
   result.egress = await egressCheck(page);
   result.egress_match = EXPECTED_CC ? result.egress.loc === EXPECTED_CC : null;
   console.log(
@@ -486,7 +519,18 @@ try {
   for (const site of SITES) {
     const rec = await visit(page, site);
     console.log(
-      `[${EXIT}] ${rec.label} -> ${rec.outcome} status=${rec.http_status ?? "-"} load=${rec.load_ms ?? rec.total_ms ?? "-"}ms fails=${rec.failed_responses}/${rec.request_failures}`,
+      [
+        `[${EXIT}] ${rec.label} -> ${rec.outcome}`,
+        `status=${rec.http_status ?? "-"}`,
+        `dcl=${rec.dcl_ms ?? "-"}ms`,
+        `load=${rec.load_ms ?? rec.total_ms ?? "-"}ms`,
+        // Spell both out: "1/0" gave no clue which kind of failure it was, or whose.
+        `http_errors=${rec.failed_responses}${summarise(rec.http_errors, (e) => `${e.status} ${e.host}`)}`,
+        `dropped=${rec.request_failures}${summarise(rec.dropped_requests, (d) => `${d.host} ${d.reason}`)}`,
+        rec.error ? `err="${rec.error}"` : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
     );
     result.navigations.push(rec);
   }
@@ -521,10 +565,10 @@ try {
   console.error(`[${EXIT}] FATAL`, e);
 } finally {
   try {
-    await page.close();
+    await page?.close();
   } catch {}
   try {
-    await browser.disconnect();
+    await browser?.disconnect();
   } catch {}
 }
 

@@ -22,6 +22,73 @@ just down
 
 `just e2e` builds the sidecar image first. Nothing has to be spawned by hand.
 
+## Three ways to run it
+
+| Mode                                            | What it targets                                               | Who owns the client                                                 |
+| ----------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `just e2e` (default, `--client-mode container`) | the local testenv stack                                       | `just up` — the suite attaches to the `gnosis_vpn-client` container |
+| `just e2e-on-network` (`--client-mode spawn`)   | a real network (rotsee etc)                                   | **the suite** — it starts and stops `gnosis_vpn-root` itself        |
+| `just e2e --client-mode host`                   | whatever a client already running on this host is attached to | you, out of band                                                    |
+
+`spawn` mirrors how `system-tests` works: the justfile stages identity/config,
+and the test owns the daemon lifecycle instead of requiring a pre-running one.
+It needs `sudo` (`gnosis_vpn-root` creates the WireGuard interface and edits the
+routing table), exactly as `just system-tests` does.
+
+### Against a real network (rotsee etc)
+
+Point it at a client config, an identity, and a Blokli URL; it starts its own
+`gnosis_vpn-root`, runs the tour, and stops it again.
+
+```sh
+sudo -v && \
+E2E_ROOT_BINARY=../gnosis_vpn-client/target/release/gnosis_vpn-root \
+E2E_WORKER_BINARY=../gnosis_vpn-client/target/release/gnosis_vpn-worker \
+E2E_CONFIG=../rotsee.toml \
+E2E_IDENTITY_FILE="$HOME/.config/gnosisvpn-hopr.id" \
+E2E_IDENTITY_PASS_FILE="$HOME/.config/gnosisvpn-hopr.pass" \
+E2E_BLOKLI_URL=https://blokli.rotsee.hoprnet.link \
+  nix develop -c just e2e-on-network --quick
+```
+
+| Variable                 | Required | What it is                                                                                                   |
+| ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------ |
+| `E2E_ROOT_BINARY`        | yes      | `gnosis_vpn-root` built for **this** host (`cargo build --release` in the client repo)                       |
+| `E2E_WORKER_BINARY`      | yes      | `gnosis_vpn-worker`, same build                                                                              |
+| `E2E_CONFIG`             | yes      | client config holding the `[destinations.*]` to test                                                         |
+| `E2E_IDENTITY_FILE`      | yes      | HOPR identity (`*.id`)                                                                                       |
+| `E2E_IDENTITY_PASS_FILE` | yes      | file containing that identity's password (a file, not the password itself, so it stays out of shell history) |
+| `E2E_IDENTITY_SAFE_FILE` | no       | defaults to the `.safe` sitting next to the identity                                                         |
+| `E2E_BLOKLI_URL`         | yes      | Blokli endpoint for the network                                                                              |
+| `E2E_WORKER_USER`        | no       | unprivileged user the worker runs as (default `gnosisvpn-dev`)                                               |
+| `E2E_STAGE_DIR`          | no       | where inputs are staged (default `/tmp/gnosis_vpn-e2e-stage`)                                                |
+
+**Reuse your existing safe.** The `.safe` file must accompany the identity —
+without it the client cannot find its safe association and onboards a brand new,
+unfunded one instead, parking in `run_mode: PreparingSafe` forever. The recipe
+picks up `<identity>.safe` automatically and warns loudly if it is missing.
+
+**Destinations are discovered**, not configured here: whatever `E2E_CONFIG`
+defines shows up via `gnosis_vpn-ctl status`. Add `--destination USA`
+(repeatable) to narrow it.
+
+`sudo` is required — `gnosis_vpn-root` creates the WireGuard interface and edits
+the routing table, exactly as `just system-tests` does. The suite keeps the sudo
+timestamp alive so a long tour does not re-prompt at teardown.
+
+`E2E_WORKER_USER` must already exist; `gnosis_vpn-root` drops privileges to it.
+macOS has no `useradd`, so unlike the Linux-only `system-tests` recipe this does
+not create the account.
+
+`nix develop` matters: `spawn` and `host` modes drive obscura **on this
+machine**, because a container cannot join a macOS host's network namespace. The
+dev shell supplies obscura and node, and the harness's node deps are installed
+on first run. Container mode needs neither.
+
+> **Full tunnel.** While the suite runs, this machine's traffic egresses through
+> the exit under test. The daemon it started is stopped on exit, including on
+> Ctrl-C. If something wedges: `sudo pkill -f gnosis_vpn-root`.
+
 ## How it runs
 
 ```

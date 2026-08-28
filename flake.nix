@@ -35,10 +35,18 @@
             ];
           };
 
+          # Host-mode e2e (`just e2e --client-mode host`) drives obscura on this machine
+          # rather than in a sidecar: a container cannot join a macOS host's network
+          # namespace, so the browser has to run where the tunnel routes actually live.
           devShells.default = pkgs.mkShell {
             packages =
               with pkgs;
               [
+                (import ./nix/obscura.nix {
+                  inherit pkgs;
+                  lib = pkgs.lib;
+                })
+                nodejs
                 gettext
                 jq
                 opentelemetry-collector
