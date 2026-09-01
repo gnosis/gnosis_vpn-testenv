@@ -49,6 +49,7 @@
                 nodejs
                 gettext
                 jq
+                bats
                 opentelemetry-collector
                 victoriametrics
                 wireguard-tools
