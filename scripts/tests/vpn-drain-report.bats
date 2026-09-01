@@ -59,6 +59,19 @@ JSONL
     [ "$output" -gt 0 ]
 }
 
+@test "avg packet loss renders as a percent, not rescaled as if it were a 0..1 fraction" {
+    write_fixture <<'JSONL'
+{"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":12.5,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"Good","gas":"Good"},"started_at":"t1","ended_at":"t2"}
+JSONL
+
+    run "$SCRIPT" --run-dir "$RUN_DIR"
+    [ "$status" -eq 0 ]
+    run grep -c '>12.5%<' "$RUN_DIR/report.html"
+    [ "$output" -eq 1 ]
+    run grep -c '>1250%<' "$RUN_DIR/report.html"
+    [ "$output" -eq 0 ]
+}
+
 @test "--out writes the report to a custom path" {
     write_fixture <<'JSONL'
 {"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":0,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"Good","gas":"Good"},"started_at":"t1","ended_at":"t2"}

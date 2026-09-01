@@ -152,6 +152,7 @@ def htmlescape: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
 def slug: gsub("[^A-Za-z0-9_-]"; "-");
 def human_ms: if . == null then "-" else (((.*10|round)/10 | tostring) + " ms") end;
 def human_pct: if . == null then "-" else (((.*100*10|round)/10 | tostring) + "%") end;
+def human_pct_raw: if . == null then "-" else (((.*10|round)/10 | tostring) + "%") end; # input already 0..100, unlike human_pct's 0..1 fraction
 def human_rate:
   if . == null then "-"
   else (
@@ -169,7 +170,7 @@ def human_rate:
 "<td>" + (.avg_latency|human_ms) + "</td>" +
 "<td>" + (.min_latency|human_ms) + " - " + (.max_latency|human_ms) + "</td>" +
 "<td>" + (.avg_throughput|human_rate) + "</td>" +
-"<td>" + (.avg_loss|human_pct) + "</td>" +
+"<td>" + (.avg_loss|human_pct_raw) + "</td>" +
 "<td>" + ((.last_capacity_used // "-")|tostring) + "/" + ((.last_capacity_available // "-")|tostring) + "</td>" +
 "<td>" + (.last_round|tostring) + "</td>" +
 "<td>" + ([.reasons[] | (.reason|htmlescape) + " (" + (.count|tostring) + ")"] | join("; ")) + "</td>" +
