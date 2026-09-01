@@ -504,6 +504,24 @@ e2e-on-network *ARGS:
     PING_TARGETS="${PING_TARGETS:-1.1.1.1,10.128.0.1}" \
         "{{justfile_directory()}}/e2e/run.sh" {{ARGS}}
 
+# ─── Scripts ─────────────────────────────────────────────────────────────────
+
+# validate connectivity on an already-connected tunnel (see scripts/README.md)
+smoke-test *args:
+    ./scripts/vpn-smoke-test.sh {{ args }}
+
+# cycle every destination until account funding drains, recording results (see scripts/README.md)
+drain-tour *args:
+    ./scripts/vpn-drain-tour.sh {{ args }}
+
+# render a vpn-drain-tour run directory into a self-contained report.html
+drain-report *args:
+    ./scripts/vpn-drain-report.sh {{ args }}
+
+# run the offline bats suite for scripts/ (no network, uses fakes)
+test-scripts:
+    bats --print-output-on-failure scripts/tests
+
 # ─── Metrics ─────────────────────────────────────────────────────────────────
 
 # Start otelcol (OTLP HTTP on 127.0.0.1:4318) and VictoriaMetrics (PromQL UI on :8428)

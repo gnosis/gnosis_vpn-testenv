@@ -127,6 +127,19 @@ speedtest passes), which is why it is a separate opt-in recipe rather than part
 of `up`. See [`e2e/README.md`](e2e/README.md) for what each measurement means,
 the env knobs, and the obscura caveats.
 
+## Connectivity smoke-test / drain-tour scripts
+
+```sh
+just smoke-test              # validate connectivity on an already-connected tunnel
+just drain-tour --out-dir …  # cycle every destination until account funding drains
+just drain-report --run-dir …  # render a drain-tour run into a self-contained report.html
+just test-scripts            # offline bats suite for scripts/, no network
+```
+
+Standalone bash tooling under [`scripts/`](scripts/README.md), independent of
+the container/e2e setup above — see that README for what each script checks and
+how to fetch them onto a bare machine.
+
 ## Configuration variables
 
 | Variable                 | Default                                                                   | Purpose                                         |
@@ -294,6 +307,10 @@ tunnel via the HOPR mixnet, both outbound).
 | `up-on-network`            | Cluster + exit server reachable from another machine on the LAN — see below    |
 | `cluster-start-on-network` | Localcluster variant used by `up-on-network` — P2P on the LAN IP               |
 | `gen-config-on-network`    | Config variant used by `up-on-network`, targeting the exit server via LAN IP   |
+| `smoke-test`               | Validate connectivity on an already-connected tunnel — see `scripts/README.md` |
+| `drain-tour`               | Cycle every destination until account funding drains — see `scripts/README.md` |
+| `drain-report`             | Render a `drain-tour` run directory into a self-contained `report.html`        |
+| `test-scripts`             | Offline bats suite for `scripts/` (no network, uses fakes)                     |
 
 On hosts running a default-deny host firewall (e.g. NixOS's
 `networking.firewall`), the localcluster's P2P transport
