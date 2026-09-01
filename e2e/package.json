@@ -1,0 +1,10 @@
+{
+  "name": "gnosis-vpn-e2e",
+  "version": "1.0.0",
+  "description": "Gnosis VPN end-to-end browser harness (obscura + Cloudflare speedtest)",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "puppeteer-core": "^25.5.0"
+  }
+}

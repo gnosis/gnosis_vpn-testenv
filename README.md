@@ -100,6 +100,33 @@ just system-tests   # delegates to gnosis_vpn-client's system-tests with generat
 just down
 ```
 
+## Running the end-to-end browser tests
+
+```sh
+just up                                  # build + cluster + servers + metrics + gen-config + client
+just e2e                                 # every destination the client reports
+just e2e --quick                         # short profile, a couple of minutes
+just e2e --destination node-<peer-id>    # a single destination
+just down
+```
+
+`just e2e` builds a sidecar image (node + obscura + the harness) and, for each
+destination, connects the client, drives a real headless browser through the
+tunnel — site loads, a Wikipedia link crawl, a Cloudflare speedtest, continuous
+ICMP — then disconnects. Results land in `E2E_OUT_DIR/<UTC-timestamp>/` as
+per-destination JSON plus a `summary.csv` that two runs can be diff'd on.
+
+The browser has to sit inside the client container's network namespace, since
+that is the only place the full-tunnel WireGuard routes exist, so the sidecar
+joins it with `docker run --network container:gnosis_vpn-client`. The
+orchestrator itself stays on the host and reaches `gnosis_vpn-ctl` via
+`docker exec`.
+
+Budget ~10 minutes per destination for the full profile (dominated by the two
+speedtest passes), which is why it is a separate opt-in recipe rather than part
+of `up`. See [`e2e/README.md`](e2e/README.md) for what each measurement means,
+the env knobs, and the obscura caveats.
+
 ## Configuration variables
 
 | Variable                 | Default                                                                   | Purpose                                         |
@@ -124,6 +151,8 @@ just down
 | `CONFIG_DIR`             | `/tmp/gnosis_vpn-testenv`                                                 | Generated config output directory               |
 | `CHAIN_IMAGE`            | `…/bloklid-anvil:latest`                                                  | Blokli + Anvil container image                  |
 | `LAN_IP`                 | auto-detected                                                             | Override for `up-on-network`'s LAN IP detection |
+| `E2E_IMAGE`              | `gnosis_vpn-e2e`                                                          | Tag for the e2e browser sidecar image           |
+| `E2E_OUT_DIR`            | `/tmp/gnosis_vpn-testenv-e2e`                                             | Parent directory for e2e run output             |
 
 ## Client state directory
 
@@ -258,6 +287,7 @@ tunnel via the HOPR mixnet, both outbound).
 | `network-create`           | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`)    |
 | `network-remove`           | Removes `DOCKER_NETWORK` (runs as part of `clean`)                             |
 | `up-client-on-host`        | `up`, but the client runs natively on the host — see below                     |
+| `build-e2e`                | Builds the e2e browser sidecar image (runs as part of `e2e`)                   |
 | `cluster-start-on-host`    | Localcluster variant used by `up-client-on-host` — P2P on `127.0.0.1`          |
 | `client-logs-on-host`      | `tail -f` the host-native client's log file                                    |
 | `client-stop-on-host`      | Stops the host-native client                                                   |
