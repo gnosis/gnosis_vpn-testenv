@@ -43,8 +43,14 @@ trend lines, a funding drain timeline, and per-destination histogram detail
 sections - printable straight to PDF from a browser.
 `./vpn-drain-report.sh --run-dir <dir>`.
 
+## `wg-traffic.sh`
+
+Samples a WireGuard interface's byte counters on an interval and logs per-window
+totals to CSV. `./wg-traffic.sh --help` for options.
+
 ## Tests
 
-`scripts/tests/*.bats` cover the scripts above offline, using fakes in
-`scripts/tests/fakes/` for `curl`/`ping`/`gnosis_vpn-ctl`/`apt-get`/`sudo`. Run
-with `bats scripts/tests/` (or `just test-scripts`).
+`scripts/tests/*.bats` cover the scripts above offline: `curl`/`ping`/
+`gnosis_vpn-ctl`/`apt-get`/`sudo` fakes in `scripts/tests/fakes/` for the VPN
+scripts, and fake sysfs interfaces (`scripts/tests/helpers.bash`) for
+`wg-traffic.sh`. Run with `bats scripts/tests/` (or `just test-scripts`).

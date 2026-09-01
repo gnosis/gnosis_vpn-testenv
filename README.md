@@ -127,12 +127,13 @@ speedtest passes), which is why it is a separate opt-in recipe rather than part
 of `up`. See [`e2e/README.md`](e2e/README.md) for what each measurement means,
 the env knobs, and the obscura caveats.
 
-## Connectivity smoke-test / drain-tour scripts
+## Connectivity smoke-test / drain-tour / traffic scripts
 
 ```sh
 just smoke-test              # validate connectivity on an already-connected tunnel
 just drain-tour --out-dir …  # cycle every destination until account funding drains
 just drain-report --run-dir …  # render a drain-tour run into a self-contained report.html
+just wg-traffic --output …   # log WireGuard byte counters to CSV over time
 just test-scripts            # offline bats suite for scripts/, no network
 ```
 
@@ -310,6 +311,7 @@ tunnel via the HOPR mixnet, both outbound).
 | `smoke-test`               | Validate connectivity on an already-connected tunnel — see `scripts/README.md` |
 | `drain-tour`               | Cycle every destination until account funding drains — see `scripts/README.md` |
 | `drain-report`             | Render a `drain-tour` run directory into a self-contained `report.html`        |
+| `wg-traffic`               | Log a WireGuard interface's byte counters to CSV over time                     |
 | `test-scripts`             | Offline bats suite for `scripts/` (no network, uses fakes)                     |
 
 On hosts running a default-deny host firewall (e.g. NixOS's
