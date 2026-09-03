@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Track download/upload volume on a WireGuard interface, reporting periodically and
 # recording a per-window total to CSV.
-# Strict mode is scoped to direct execution so the bats suite can safely `source` this
-# file without inheriting -e/-u into the test runner.
+# Scoped to direct execution so bats sourcing this file doesn't inherit -e/-u.
 if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
     set -euo pipefail
 fi
