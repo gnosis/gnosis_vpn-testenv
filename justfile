@@ -518,6 +518,10 @@ drain-tour *args:
 drain-report *args:
     ./scripts/vpn-drain-report.sh {{ args }}
 
+# sample a WireGuard interface's byte counters, logging per-window totals to CSV
+wg-traffic *args:
+    ./scripts/wg-traffic.sh {{ args }}
+
 # run the offline bats suite for scripts/ (no network, uses fakes)
 test-scripts:
     bats --print-output-on-failure scripts/tests
