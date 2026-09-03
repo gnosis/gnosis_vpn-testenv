@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Track download/upload volume on a WireGuard interface, reporting periodically and
 # recording a per-window total to CSV.
-set -euo pipefail
+# Strict mode is scoped to direct execution so the bats suite can safely `source` this
+# file without inheriting -e/-u into the test runner.
+if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
+    set -euo pipefail
+fi
 
 readonly DEFAULT_IFACE="wg0_gnosisvpn"
 readonly DEFAULT_RESET="1h"
