@@ -95,9 +95,53 @@ needed when run this way.
 ## Running system tests
 
 ```sh
-just up             # build + cluster + servers + metrics + gen-config
-just system-tests   # delegates to gnosis_vpn-client's system-tests with generated artifacts
+just up             # build + cluster + servers + metrics + gen-config + client
+just client-stop    # the runner brings up its own client on the same identity
+just system-tests   # runs gnosis_vpn-client's system-test binary against the generated artifacts
 just down
+```
+
+`just system-tests` runs the client's `gnosis_vpn-system_tests` binary directly rather than
+delegating to gnosis_vpn-client's own `system-tests` recipe: that recipe targets a _deployed_
+network, taking its config and Blokli URL from a checked-in
+`gnosis_vpn-system_tests/networks/<name>/` fixture picked by `SYSTEM_TEST_NETWORK`. A localcluster
+has no such fixture — destinations, identity and Blokli URL are generated fresh by `gen-config` on
+every run — so this repo stages those artifacts and the worker-user setup itself.
+
+It needs `sudo`: the runner creates the worker user if missing, spawns `gnosis_vpn-root` as root,
+and brings up a full-tunnel WireGuard interface. **While it runs, this machine's traffic egresses
+through the exit under test.** It also refuses to start while the `gnosis_vpn-client` container is
+up, since the runner's own client uses the same HOPR identity (`extra_id.id`) the container was
+handed — two nodes on one chain key announce the same peer twice and fight over the Safe.
+
+`SYSTEM_TEST_STATE_DIR` is wiped at the start of every run: `cluster-stop` deletes `DATA_DIR` and
+the chain container, so a state home kept from an earlier run caches a Safe address that no longer
+exists on the new chain.
+
+Arguments are passed through to the runner, so the optional download phase is reachable:
+
+```sh
+just system-tests download --attempts 2
+```
+
+### Keeping hoprd and gnosis_vpn-client compatible
+
+The two have to be built against the **same `hopr-lib` revision**, and it is not enough for them to
+merely both be on `main`. `hopr-lib` is pinned by git rev in both repos — `Cargo.toml` in `hoprd`,
+transitively through `edgli` in `gnosis_vpn-client` — and the wire format changes between revs
+without a protocol version bump. hoprnet `7c7e0ed8` ("generation-tagged SURB consumption"), for
+instance, grew the SURB from 401 to 402 bytes, so a client and a node on either side of it cannot
+read each other's replies at all. What that looks like:
+
+- `hoprd` node logs: `error while dispatching packet in the session manager error=invalid start protocol version`
+- client logs: `hopr_transport_probe::probe: cannot deserialize message … Message.version`
+- `gnosis_vpn-ctl status`: every destination stuck at `Needs channel`, no channels ever opened
+
+Check the pairing before blaming the stack:
+
+```sh
+grep -m1 -o 'rev = "[0-9a-f]*"' ../hoprd/Cargo.toml
+grep -o 'rev=[0-9a-f]*' ../gnosis_vpn-client/Cargo.lock | sort -u
 ```
 
 ## Running the end-to-end browser tests
@@ -167,6 +211,11 @@ how to fetch them onto a bare machine.
 | `LAN_IP`                 | auto-detected                                                             | Override for `up-on-network`'s LAN IP detection |
 | `E2E_IMAGE`              | `gnosis_vpn-e2e`                                                          | Tag for the e2e browser sidecar image           |
 | `E2E_OUT_DIR`            | `/tmp/gnosis_vpn-testenv-e2e`                                             | Parent directory for e2e run output             |
+| `HOPRD_BIN`              | `$HOPRD_DIR/result-hoprd/bin/hoprd`                                       | hoprd node binary the localcluster spawns       |
+| `LOCALCLUSTER_BIN`       | `$HOPRD_DIR/result-localcluster/bin/hoprd-localcluster`                   | Localcluster binary (override with `HOPRD_BIN`) |
+| `SYSTEM_TEST_WORKER_USER`| `gnosisvpn`                                                               | Worker user for `system-tests` (created if new) |
+| `SYSTEM_TEST_STATE_DIR`  | `/tmp/gnosis_vpn-testenv-system-tests`                                    | `system-tests` state home (wiped every run)     |
+| `SYSTEM_TEST_LOG_LEVEL`  | `info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the `system-tests` run             |
 
 ## Client state directory
 
@@ -343,3 +392,25 @@ your host firewall.
 - Exit-node (`gnosis_vpn-server`) containers are unaffected by this change and
   don't join `DOCKER_NETWORK` — the cluster already reaches their published host
   ports directly, as before.
+- `build-cluster` builds `binary-hoprd-pix-test-x86_64-linux`, not the default
+  `binary-hoprd`. gnosis_vpn-client builds `edgli` with `pix-test`
+  (`hopr-lib/pix-secp256k1`) and enables PIX for the main tunnel session by
+  default, while `binary-hoprd` takes hopr-lib's default `pix-bjj`. The curve is
+  a network-wide invariant that nothing negotiates, so a `pix-bjj` exit refuses
+  every session this client opens (`UnacceptablePixParams`, logged on the node as
+  "refusing a client offering a PIX curve suite this node was not built for").
+- The client's post-connect tunnel ping is hardcoded to `10.128.0.1`
+  (`ping::Options::default()` in `core::runner::tunnel_ping_loop`) and does not
+  read `[connection.ping] address`, which only the connect-time verification ping
+  honours. `gnosis_vpn-server`'s `docker/wggvpn.conf` puts the exit's WireGuard
+  interface on `10.129.0.1`, so that probe can never answer here and the client
+  tears the tunnel down and reconnects roughly every 90 s
+  ("tunnel ping exceeded max failures - reconnecting"). Connections still
+  establish, so the system tests pass, but nothing stays up for long.
+- PIX *settles* only if the exit also runs the `Pix` strategy, which is opt-in
+  and not part of hoprd's default strategy set. `hoprd-localcluster --enable-pix`
+  adds it, but its demo geometry caps the accepted per-SSA quota at 1 MiB, and
+  gnosis_vpn-client offers hopr-lib's default ≈649 MiB — so that flag cannot serve
+  this client as it stands, and the recipes don't pass it. Without it the exit
+  accepts PIX sessions (its default quota window covers the client's offer) but
+  never observes the deposits the client makes.

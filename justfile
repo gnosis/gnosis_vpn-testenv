@@ -8,6 +8,13 @@ CLUSTER_SIZE := env_var_or_default("CLUSTER_SIZE", "3")
 DATA_DIR     := env_var_or_default("DATA_DIR",     "/tmp/hopr-nodes")
 CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest")
 
+# The two cluster binaries. Default to what `build-cluster` produces; override to run against
+# binaries built some other way (e.g. `cargo build --release -p hoprd --features strategy-pix-test`
+# plus `-p hoprd-localcluster` in a checkout of another commit). Override them together: the
+# localcluster writes the node configs the hoprd binary then has to accept.
+HOPRD_BIN        := env_var_or_default("HOPRD_BIN",        HOPRD_DIR + "/result-hoprd/bin/hoprd")
+LOCALCLUSTER_BIN := env_var_or_default("LOCALCLUSTER_BIN", HOPRD_DIR + "/result-localcluster/bin/hoprd-localcluster")
+
 # Docker network the client container joins to reach the (host-native) localcluster.
 # Fixed subnet so the gateway IP — what the cluster binds/announces its P2P host as — is deterministic.
 DOCKER_NETWORK         := env_var_or_default("DOCKER_NETWORK",         "gnosis-vpn-testenv")
@@ -44,6 +51,12 @@ CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client
 E2E_IMAGE   := env_var_or_default("E2E_IMAGE",   "gnosis_vpn-e2e")
 E2E_OUT_DIR := env_var_or_default("E2E_OUT_DIR", "/tmp/gnosis_vpn-testenv-e2e")
 
+# System-test run: worker user (created by the recipe if missing), its state home (wiped per run),
+# and the runner's RUST_LOG
+SYSTEM_TEST_WORKER_USER := env_var_or_default("SYSTEM_TEST_WORKER_USER", "gnosisvpn")
+SYSTEM_TEST_STATE_DIR   := env_var_or_default("SYSTEM_TEST_STATE_DIR",   "/tmp/gnosis_vpn-testenv-system-tests")
+SYSTEM_TEST_LOG_LEVEL   := env_var_or_default("SYSTEM_TEST_LOG_LEVEL",   "info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
+
 # Generated config output dir
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
@@ -57,9 +70,16 @@ default:
 
 # ─── Build ───────────────────────────────────────────────────────────────────
 
+# The node binary is the `pix-test` variant, not the default `binary-hoprd`. gnosis_vpn-client
+# builds edgli with `pix-test`, i.e. `hopr-lib/pix-secp256k1`, and turns PIX on for the main
+# tunnel session by default — while `binary-hoprd` takes hopr-lib's default, `pix-bjj`. The curve
+# is a network-wide invariant that nothing negotiates, so a bjj Exit refuses every session this
+# client opens with `UnacceptablePixParams` ("refusing a client offering a PIX curve suite this
+# node was not built for" in the node log) and no destination ever connects. `hoprd-localcluster`
+# is already built against hoprd's `strategy-pix-test`, so only the node binary was mismatched.
 # Build hoprd and hoprd-localcluster binaries via nix
 build-cluster:
-    nix build -L --out-link {{HOPRD_DIR}}/result-hoprd        {{HOPRD_DIR}}#binary-hoprd
+    nix build -L --out-link {{HOPRD_DIR}}/result-hoprd        {{HOPRD_DIR}}#binary-hoprd-pix-test-x86_64-linux
     nix build -L --out-link {{HOPRD_DIR}}/result-localcluster {{HOPRD_DIR}}#binary-hoprd-localcluster
 
 # Build gnosis_vpn-server Docker image
@@ -100,8 +120,8 @@ network-remove:
 _cluster-start p2p_host:
     #!/usr/bin/env bash
     set -euo pipefail
-    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
-    hoprd_bin="{{HOPRD_DIR}}/result-hoprd/bin/hoprd"
+    lc_bin="{{LOCALCLUSTER_BIN}}"
+    hoprd_bin="{{HOPRD_BIN}}"
     if [ ! -f "${lc_bin}" ]; then
         echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
         echo "Run 'just build-cluster' to build it first" >&2
@@ -129,8 +149,8 @@ _cluster-start p2p_host:
         just cluster-stop
     fi
     RUST_LOG={{CLUSTER_LOG_LEVEL}} \
-        "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" \
-        --hoprd-bin   "{{HOPRD_DIR}}/result-hoprd/bin/hoprd" \
+        "${lc_bin}" \
+        --hoprd-bin   "${hoprd_bin}" \
         --chain-image "{{CHAIN_IMAGE}}" \
         --size        {{CLUSTER_SIZE}} \
         --p2p-host    "${p2p_host}" \
@@ -154,7 +174,7 @@ cluster-start-on-network:
 cluster-wait:
     #!/usr/bin/env bash
     set -euo pipefail
-    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    lc_bin="{{LOCALCLUSTER_BIN}}"
     if [ ! -f "${lc_bin}" ]; then
         echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
         echo "Run 'just build-cluster' to build it first" >&2
@@ -170,7 +190,7 @@ cluster-wait:
 cluster-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    lc_bin="{{LOCALCLUSTER_BIN}}"
     if [ ! -f "${lc_bin}" ]; then
         echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
         echo "Run 'just build-cluster' to build it first" >&2
@@ -243,7 +263,7 @@ gen-config:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p "{{CONFIG_DIR}}"
-    lc_bin="{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster"
+    lc_bin="{{LOCALCLUSTER_BIN}}"
 
     status=$("${lc_bin}" status --data-dir "{{DATA_DIR}}")
     blokli_url=$(echo "${status}" | jq -r '.blokli_url')
@@ -393,11 +413,23 @@ client-logs-on-host:
     tail -f "{{CLIENT_LOG_FILE}}"
 
 # Purge worker state without prompting (used by down).
-# sudo: the container's entrypoint chowns this bind-mounted dir to its internal
-# worker uid, which may not be removable by the host user without it.
+# Escalates only when it has to. The *container's* entrypoint chowns this bind-mounted dir to its
+# internal worker uid, so the host user cannot remove it afterwards — but when the client ran on the
+# host, or never ran at all, the directory is plainly removable or absent. Asking for a password
+# there failed the whole `down` on a shell without a tty, after everything else had already stopped.
 _purge-state:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -e "{{CLIENT_STATE_DIR}}" ]; then
+        echo "{{CLIENT_STATE_DIR}} does not exist — nothing to purge"
+        exit 0
+    fi
+    if rm -rf "{{CLIENT_STATE_DIR}}" 2>/dev/null; then
+        echo "Purged {{CLIENT_STATE_DIR}}"
+        exit 0
+    fi
     sudo rm -rf "{{CLIENT_STATE_DIR}}"
-    echo "Purged {{CLIENT_STATE_DIR}}"
+    echo "Purged {{CLIENT_STATE_DIR}} (needed sudo)"
 
 # Remove all persistent worker state (identity keys, cache) from CLIENT_STATE_DIR
 purge-state:
@@ -413,29 +445,91 @@ purge-state:
 
 # ─── System tests ────────────────────────────────────────────────────────────
 
+# Runs the client's system-test binary directly instead of delegating to gnosis_vpn-client's own
+# `system-tests` recipe: that recipe targets a *deployed* network, picking config and Blokli URL
+# from a checked-in `gnosis_vpn-system_tests/networks/<name>/` fixture selected by
+# SYSTEM_TEST_NETWORK. A localcluster has neither — its destinations, identity and Blokli URL are
+# generated fresh by `gen-config` on every run — so the artifacts and the worker-user setup are
+# staged here. Everything the runner itself needs is the same; only where it comes from differs.
+# Full tunnel: while it runs, this machine's traffic egresses through the exit under test.
 # Run gnosis_vpn-client system tests against the live local stack
-system-tests:
+system-tests *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    for artifact in client.toml extra_id.id extra_id.password extra_id.safe blokli_url; do
+    for artifact in client.toml extra_id.id extra_id.password blokli_url; do
         if [ ! -f "{{CONFIG_DIR}}/${artifact}" ]; then
             echo "Missing {{CONFIG_DIR}}/${artifact} — run 'just gen-config' first" >&2
             exit 1
         fi
     done
 
-    worker_binary="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
-    if [ ! -f "${worker_binary}" ]; then
-        echo "Missing ${worker_binary} — run 'just build-client' first" >&2
+    # The runner brings up its own client on `extra_id.id` — the same identity `client-start` hands
+    # the container. Two nodes sharing one chain key announce the same peer twice and fight over the
+    # Safe, so the container has to be down first. (`up` starts it; use the recipes it composes.)
+    if docker container inspect gnosis_vpn-client > /dev/null 2>&1; then
+        echo "The gnosis_vpn-client container is running — it holds the same HOPR identity this" >&2
+        echo "test needs. Stop it first: just client-stop" >&2
         exit 1
     fi
 
-    SYSTEM_TEST_HOPRD_ID=$(cat "{{CONFIG_DIR}}/extra_id.id") \
-    SYSTEM_TEST_HOPRD_ID_PASSWORD=$(cat "{{CONFIG_DIR}}/extra_id.password") \
-    SYSTEM_TEST_SAFE=$(cat "{{CONFIG_DIR}}/extra_id.safe") \
-    SYSTEM_TEST_CONFIG=$(cat "{{CONFIG_DIR}}/client.toml") \
-    SYSTEM_TEST_WORKER_BINARY="${worker_binary}" \
-        just -d "{{GVPN_CLIENT_DIR}}" -f "{{GVPN_CLIENT_DIR}}/justfile" system-tests
+    # Resolved through the symlink, so what the unprivileged worker user is handed is the
+    # world-readable /nix/store path rather than one under someone's home directory.
+    root_binary=$(readlink -f "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"   2>/dev/null || true)
+    worker_binary=$(readlink -f "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" 2>/dev/null || true)
+    if [ ! -x "${root_binary}" ] || [ ! -x "${worker_binary}" ]; then
+        echo "Missing client binaries in {{GVPN_CLIENT_DIR}}/result/bin — run 'just build-client' first" >&2
+        exit 1
+    fi
+
+    # Its own flake output — `binary-gnosis_vpn-x86_64-linux` ships root/worker/ctl only.
+    nix build -L --out-link "{{GVPN_CLIENT_DIR}}/result-system-tests" \
+        "{{GVPN_CLIENT_DIR}}#binary-gnosis_vpn-system_tests"
+    test_binary="{{GVPN_CLIENT_DIR}}/result-system-tests/bin/gnosis_vpn-system_tests"
+
+    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
+    identity_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+
+    # Name the resolved target up front, so a failed run does not need this recipe to explain itself
+    echo "=== system test target ==="
+    echo "  blokli:      ${blokli_url}"
+    grep -o '^\[destinations\.[^]]*\]' "{{CONFIG_DIR}}/client.toml" | sed 's/^/  destination: /' || true
+    echo "  config:      {{CONFIG_DIR}}/client.toml"
+    echo "  root:        ${root_binary}"
+    echo "  worker:      ${worker_binary}"
+    echo "  runner:      $(readlink -f "${test_binary}")"
+    echo "  worker user: {{SYSTEM_TEST_WORKER_USER}}"
+    echo "  state home:  {{SYSTEM_TEST_STATE_DIR}}"
+    echo "=========================="
+
+    # Refresh the sudo credential timestamp so the long run below doesn't hit a prompt later
+    sudo -v
+
+    if ! getent passwd "{{SYSTEM_TEST_WORKER_USER}}" > /dev/null 2>&1; then
+        # No home of its own: the state directory is handed over explicitly via GNOSISVPN_HOME below.
+        sudo useradd --system --user-group --no-create-home \
+            --home-dir "{{SYSTEM_TEST_STATE_DIR}}" "{{SYSTEM_TEST_WORKER_USER}}"
+        echo "Created system user {{SYSTEM_TEST_WORKER_USER}}"
+    fi
+
+    # `cluster-stop` wipes DATA_DIR and the chain container, so every cluster comes up with a new
+    # chain: a state home from an earlier run caches a Safe address that no longer exists on it.
+    # Wiped rather than reused, which is why this is a dedicated directory and not CLIENT_STATE_DIR.
+    sudo rm -rf "{{SYSTEM_TEST_STATE_DIR}}"
+    sudo mkdir -p "{{SYSTEM_TEST_STATE_DIR}}"
+    sudo chown "{{SYSTEM_TEST_WORKER_USER}}:{{SYSTEM_TEST_WORKER_USER}}" "{{SYSTEM_TEST_STATE_DIR}}"
+
+    # sudo's env_reset drops the environment, so every variable the spawned gnosis_vpn-root needs
+    # is restated here as an assignment on the command line.
+    sudo \
+        CARGO_BIN_EXE_GNOSIS_VPN_ROOT="${root_binary}" \
+        GNOSISVPN_CONFIG_PATH="{{CONFIG_DIR}}/client.toml" \
+        GNOSISVPN_HOME="{{SYSTEM_TEST_STATE_DIR}}" \
+        GNOSISVPN_WORKER_USER="{{SYSTEM_TEST_WORKER_USER}}" \
+        GNOSISVPN_WORKER_BINARY="${worker_binary}" \
+        GNOSISVPN_HOPR_IDENTITY_FILE="{{CONFIG_DIR}}/extra_id.id" \
+        GNOSISVPN_HOPR_IDENTITY_PASS="${identity_pass}" \
+        RUST_LOG="{{SYSTEM_TEST_LOG_LEVEL}}" \
+        "${test_binary}" --blokliUrl "${blokli_url}" {{ARGS}}
 
 # ─── End-to-end tests ────────────────────────────────────────────────────────
 
@@ -695,7 +789,7 @@ _lan-ip:
 _cluster-p2p-host:
     #!/usr/bin/env bash
     set -euo pipefail
-    "{{HOPRD_DIR}}/result-localcluster/bin/hoprd-localcluster" status --data-dir "{{DATA_DIR}}" 2>/dev/null \
+    "{{LOCALCLUSTER_BIN}}" status --data-dir "{{DATA_DIR}}" 2>/dev/null \
         | jq -r '.nodes[0].p2p // empty' | sed -n 's/:[0-9]*$//p'
 
 # Print <name>'s checked-out branch and commit, plus tag if HEAD is exactly tagged
