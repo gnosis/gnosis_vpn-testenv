@@ -101,24 +101,28 @@ just system-tests   # runs gnosis_vpn-client's system-test binary against the ge
 just down
 ```
 
-`just system-tests` runs the client's `gnosis_vpn-system_tests` binary directly rather than
-delegating to gnosis_vpn-client's own `system-tests` recipe: that recipe targets a _deployed_
-network, taking its config and Blokli URL from a checked-in
-`gnosis_vpn-system_tests/networks/<name>/` fixture picked by `SYSTEM_TEST_NETWORK`. A localcluster
-has no such fixture — destinations, identity and Blokli URL are generated fresh by `gen-config` on
-every run — so this repo stages those artifacts and the worker-user setup itself.
+`just system-tests` runs the client's `gnosis_vpn-system_tests` binary directly
+rather than delegating to gnosis_vpn-client's own `system-tests` recipe: that
+recipe targets a _deployed_ network, taking its config and Blokli URL from a
+checked-in `gnosis_vpn-system_tests/networks/<name>/` fixture picked by
+`SYSTEM_TEST_NETWORK`. A localcluster has no such fixture — destinations,
+identity and Blokli URL are generated fresh by `gen-config` on every run — so
+this repo stages those artifacts and the worker-user setup itself.
 
-It needs `sudo`: the runner creates the worker user if missing, spawns `gnosis_vpn-root` as root,
-and brings up a full-tunnel WireGuard interface. **While it runs, this machine's traffic egresses
-through the exit under test.** It also refuses to start while the `gnosis_vpn-client` container is
-up, since the runner's own client uses the same HOPR identity (`extra_id.id`) the container was
-handed — two nodes on one chain key announce the same peer twice and fight over the Safe.
+It needs `sudo`: the runner creates the worker user if missing, spawns
+`gnosis_vpn-root` as root, and brings up a full-tunnel WireGuard interface.
+**While it runs, this machine's traffic egresses through the exit under test.**
+It also refuses to start while the `gnosis_vpn-client` container is up, since
+the runner's own client uses the same HOPR identity (`extra_id.id`) the
+container was handed — two nodes on one chain key announce the same peer twice
+and fight over the Safe.
 
-`SYSTEM_TEST_STATE_DIR` is wiped at the start of every run: `cluster-stop` deletes `DATA_DIR` and
-the chain container, so a state home kept from an earlier run caches a Safe address that no longer
-exists on the new chain.
+`SYSTEM_TEST_STATE_DIR` is wiped at the start of every run: `cluster-stop`
+deletes `DATA_DIR` and the chain container, so a state home kept from an earlier
+run caches a Safe address that no longer exists on the new chain.
 
-Arguments are passed through to the runner, so the optional download phase is reachable:
+Arguments are passed through to the runner, so the optional download phase is
+reachable:
 
 ```sh
 just system-tests download --attempts 2
@@ -126,23 +130,82 @@ just system-tests download --attempts 2
 
 ### Keeping hoprd and gnosis_vpn-client compatible
 
-The two have to be built against the **same `hopr-lib` revision**, and it is not enough for them to
-merely both be on `main`. `hopr-lib` is pinned by git rev in both repos — `Cargo.toml` in `hoprd`,
-transitively through `edgli` in `gnosis_vpn-client` — and the wire format changes between revs
-without a protocol version bump. hoprnet `7c7e0ed8` ("generation-tagged SURB consumption"), for
-instance, grew the SURB from 401 to 402 bytes, so a client and a node on either side of it cannot
-read each other's replies at all. What that looks like:
+The two have to be built against the **same `hopr-lib` revision**, and it is not
+enough for them to merely both be on `main`. `hopr-lib` is pinned by git rev in
+both repos — `Cargo.toml` in `hoprd`, transitively through `edgli` in
+`gnosis_vpn-client` — and the wire format changes between revs without a
+protocol version bump. hoprnet `7c7e0ed8` ("generation-tagged SURB
+consumption"), for instance, grew the SURB from 401 to 402 bytes, so a client
+and a node on either side of it cannot read each other's replies at all. What
+that looks like:
 
-- `hoprd` node logs: `error while dispatching packet in the session manager error=invalid start protocol version`
-- client logs: `hopr_transport_probe::probe: cannot deserialize message … Message.version`
-- `gnosis_vpn-ctl status`: every destination stuck at `Needs channel`, no channels ever opened
+- `hoprd` node logs:
+  `error while dispatching packet in the session manager error=invalid start protocol version`
+- client logs:
+  `hopr_transport_probe::probe: cannot deserialize message … Message.version`
+- `gnosis_vpn-ctl status`: every destination stuck at `Needs channel`, no
+  channels ever opened
 
-Check the pairing before blaming the stack:
+Check the pairing before blaming the stack — the two commands must print the
+same rev:
 
 ```sh
 grep -m1 -o 'rev = "[0-9a-f]*"' ../hoprd/Cargo.toml
-grep -o 'rev=[0-9a-f]*' ../gnosis_vpn-client/Cargo.lock | sort -u
+grep -o 'hoprnet?rev=[0-9a-f]*' ../gnosis_vpn-client/Cargo.lock | sort -u
 ```
+
+The client's side of that is two pins that must agree with each other as well:
+`edgli` (which pins `hopr-lib` itself) and `hopr-utils-session`. More than one
+rev in the second command means Cargo is building hoprnet twice, which fails
+with `expected hopr_lib::HoprSessionClientConfig, found
+HoprSessionClientConfig`
+long before anything reaches the wire.
+
+## Running the PIX system test
+
+```sh
+just up-pix            # like `up`, but PIX enabled on the cluster *and* in the client config
+just system-test-pix   # drive a full deposit → recover → sweep cycle and assert the exit's income
+just down
+```
+
+PIX pays an exit per byte it delivers back to the client: the exit asks the
+client to commit to an SSA, the client deposits `price_per_byte × quota` to a
+stealth address, downstream packets carry that SSA's shares home on spent SURBs
+until the exit can reconstruct the stealth key, and the exit sweeps the deposit
+into its Safe. One cycle covers exactly `quota` bytes of exit → client data, so
+the exit's income and the traffic it served are the same number from two sides —
+which is what [`pix/run.sh`](pix/run.sh) asserts, entirely from the exit's own
+`/metrics` and REST API plus `gnosis_vpn-ctl`. It drives the _containerised_
+client, so unlike `system-tests` it needs no `sudo` and touches no host routing.
+
+Both ends have to agree or nothing settles, which is why one switch
+(`CLUSTER_ENABLE_PIX`, set by `up-pix`) drives both the cluster's `--enable-pix`
+and which PIX block `gen-config` emits:
+
+- **dimensions.** The per-SSA quota is
+  `num_ssa_parts × (ssa_part_size + additional_shares) × 1038`, and hopr-lib's
+  defaults put it at ~649 MiB — one cycle would need that much downstream
+  traffic. The cluster's demo geometry is `8 × (2+2) × 1038` = 33 216 B and
+  completes in seconds. Its exit also accepts only quotas in `0 … 1 MiB`, so a
+  mismatched client is refused outright with `UnacceptablePixParams`. Matching
+  it needs `[connection.pix.dimensions]`, which is why this test requires a
+  `gnosis_vpn-client` carrying that config key.
+- **price.** `price_per_byte` is _not_ negotiated: each side multiplies the
+  agreed quota by its own configured price, so a mismatch leaves the exit
+  waiting for a deposit that will never arrive while the client believes it has
+  paid.
+
+The run takes roughly five minutes on top of `up-pix`, most of it a 180 s
+traffic window. Cycles are paced by the SSA exchange rather than by bytes — each
+waits on a deposit landing on chain and on enough of its shares riding home — so
+what buys more of them is a longer window, `--seconds N`, not more traffic.
+
+One assertion is deliberately an inequality: `--enable-pix` leaves
+auto-redeeming on and there is no flag to disable it, so winning tickets also
+credit the exit's Safe and its growth can only be required to be _at least_ the
+PIX income. The exactness is carried instead by the integer PIX counters and by
+`hopr_strategy_pix_last_sweep_hopr`, which is the wxHOPR of a single sweep.
 
 ## Running the end-to-end browser tests
 
@@ -187,35 +250,36 @@ how to fetch them onto a bare machine.
 
 ## Configuration variables
 
-| Variable                 | Default                                                                   | Purpose                                         |
-| ------------------------ | ------------------------------------------------------------------------- | ----------------------------------------------- |
-| `HOPRD_DIR`              | `../hoprd`                                                                | Path to hoprd repo                              |
-| `GVPN_SERVER_DIR`        | `../gnosis_vpn-server`                                                    | Path to gnosis_vpn-server repo                  |
-| `GVPN_CLIENT_DIR`        | `../gnosis_vpn-client`                                                    | Path to gnosis_vpn-client repo                  |
-| `CLUSTER_SIZE`           | `3`                                                                       | Number of HOPR nodes in localcluster            |
-| `SERVER_COUNT`           | `1`                                                                       | Number of VPN server containers                 |
-| `HOPS`                   | `1`                                                                       | Session hop count for destinations              |
-| `DOCKER_NETWORK`         | `gnosis-vpn-testenv`                                                      | Docker network joining client to localcluster   |
-| `DOCKER_NETWORK_SUBNET`  | `172.30.0.0/24`                                                           | Subnet for `DOCKER_NETWORK`                     |
-| `DOCKER_NETWORK_GATEWAY` | `172.30.0.1`                                                              | Gateway IP — also the cluster's P2P bind host   |
-| `CLIENT_STATE_DIR`       | `/tmp/gnosis_vpn-testenv-state`                                           | Persistent worker state (identity keys, cache)  |
-| `CLIENT_LOG_LEVEL`       | `warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the client                         |
-| `CLIENT_WORKER_USER`     | `gnosisvpntestenv`                                                        | Host user for `up-client-on-host` (must exist)  |
-| `CLIENT_LOG_FILE`        | `/tmp/gnosis_vpn-client.log`                                              | Log file for `up-client-on-host`                |
-| `SERVER_LOG_LEVEL`       | `info`                                                                    | RUST_LOG for VPN server containers              |
-| `CLUSTER_LOG_LEVEL`      | `info`                                                                    | RUST_LOG for the localcluster                   |
-| `DATA_DIR`               | `/tmp/hopr-nodes`                                                         | Localcluster data directory                     |
-| `METRICS_DATA_DIR`       | `/tmp/hopr-metrics-data`                                                  | VictoriaMetrics on-disk storage                 |
-| `CONFIG_DIR`             | `/tmp/gnosis_vpn-testenv`                                                 | Generated config output directory               |
-| `CHAIN_IMAGE`            | `…/bloklid-anvil:latest`                                                  | Blokli + Anvil container image                  |
-| `LAN_IP`                 | auto-detected                                                             | Override for `up-on-network`'s LAN IP detection |
-| `E2E_IMAGE`              | `gnosis_vpn-e2e`                                                          | Tag for the e2e browser sidecar image           |
-| `E2E_OUT_DIR`            | `/tmp/gnosis_vpn-testenv-e2e`                                             | Parent directory for e2e run output             |
-| `HOPRD_BIN`              | `$HOPRD_DIR/result-hoprd/bin/hoprd`                                       | hoprd node binary the localcluster spawns       |
-| `LOCALCLUSTER_BIN`       | `$HOPRD_DIR/result-localcluster/bin/hoprd-localcluster`                   | Localcluster binary (override with `HOPRD_BIN`) |
-| `SYSTEM_TEST_WORKER_USER`| `gnosisvpn`                                                               | Worker user for `system-tests` (created if new) |
-| `SYSTEM_TEST_STATE_DIR`  | `/tmp/gnosis_vpn-testenv-system-tests`                                    | `system-tests` state home (wiped every run)     |
-| `SYSTEM_TEST_LOG_LEVEL`  | `info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the `system-tests` run             |
+| Variable                  | Default                                                                   | Purpose                                         |
+| ------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------- |
+| `HOPRD_DIR`               | `../hoprd`                                                                | Path to hoprd repo                              |
+| `GVPN_SERVER_DIR`         | `../gnosis_vpn-server`                                                    | Path to gnosis_vpn-server repo                  |
+| `GVPN_CLIENT_DIR`         | `../gnosis_vpn-client`                                                    | Path to gnosis_vpn-client repo                  |
+| `CLUSTER_SIZE`            | `3`                                                                       | Number of HOPR nodes in localcluster            |
+| `SERVER_COUNT`            | `1`                                                                       | Number of VPN server containers                 |
+| `HOPS`                    | `1`                                                                       | Session hop count for destinations              |
+| `DOCKER_NETWORK`          | `gnosis-vpn-testenv`                                                      | Docker network joining client to localcluster   |
+| `DOCKER_NETWORK_SUBNET`   | `172.30.0.0/24`                                                           | Subnet for `DOCKER_NETWORK`                     |
+| `DOCKER_NETWORK_GATEWAY`  | `172.30.0.1`                                                              | Gateway IP — also the cluster's P2P bind host   |
+| `CLIENT_STATE_DIR`        | `/tmp/gnosis_vpn-testenv-state`                                           | Persistent worker state (identity keys, cache)  |
+| `CLIENT_LOG_LEVEL`        | `warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the client                         |
+| `CLIENT_WORKER_USER`      | `gnosisvpntestenv`                                                        | Host user for `up-client-on-host` (must exist)  |
+| `CLIENT_LOG_FILE`         | `/tmp/gnosis_vpn-client.log`                                              | Log file for `up-client-on-host`                |
+| `SERVER_LOG_LEVEL`        | `info`                                                                    | RUST_LOG for VPN server containers              |
+| `CLUSTER_LOG_LEVEL`       | `info`                                                                    | RUST_LOG for the localcluster                   |
+| `DATA_DIR`                | `/tmp/hopr-nodes`                                                         | Localcluster data directory                     |
+| `METRICS_DATA_DIR`        | `/tmp/hopr-metrics-data`                                                  | VictoriaMetrics on-disk storage                 |
+| `CONFIG_DIR`              | `/tmp/gnosis_vpn-testenv`                                                 | Generated config output directory               |
+| `CHAIN_IMAGE`             | `…/bloklid-anvil:latest`                                                  | Blokli + Anvil container image                  |
+| `LAN_IP`                  | auto-detected                                                             | Override for `up-on-network`'s LAN IP detection |
+| `E2E_IMAGE`               | `gnosis_vpn-e2e`                                                          | Tag for the e2e browser sidecar image           |
+| `E2E_OUT_DIR`             | `/tmp/gnosis_vpn-testenv-e2e`                                             | Parent directory for e2e run output             |
+| `CLUSTER_ENABLE_PIX`      | unset                                                                     | Non-empty: `--enable-pix` + PIX client config   |
+| `HOPRD_BIN`               | `$HOPRD_DIR/result-hoprd/bin/hoprd`                                       | hoprd node binary the localcluster spawns       |
+| `LOCALCLUSTER_BIN`        | `$HOPRD_DIR/result-localcluster/bin/hoprd-localcluster`                   | Localcluster binary (override with `HOPRD_BIN`) |
+| `SYSTEM_TEST_WORKER_USER` | `gnosisvpn`                                                               | Worker user for `system-tests` (created if new) |
+| `SYSTEM_TEST_STATE_DIR`   | `/tmp/gnosis_vpn-testenv-system-tests`                                    | `system-tests` state home (wiped every run)     |
+| `SYSTEM_TEST_LOG_LEVEL`   | `info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug` | RUST_LOG for the `system-tests` run             |
 
 ## Client state directory
 
@@ -349,6 +413,8 @@ tunnel via the HOPR mixnet, both outbound).
 | `summary`                  | Print `gnosis_vpn-ctl` usage and component commits/tags (runs as part of `up`) |
 | `network-create`           | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`)    |
 | `network-remove`           | Removes `DOCKER_NETWORK` (runs as part of `clean`)                             |
+| `up-pix`                   | `up` with PIX enabled on the cluster and in the client config — see above      |
+| `system-test-pix`          | Drive a PIX cycle and assert the exit's income — see above                     |
 | `up-client-on-host`        | `up`, but the client runs natively on the host — see below                     |
 | `build-e2e`                | Builds the e2e browser sidecar image (runs as part of `e2e`)                   |
 | `cluster-start-on-host`    | Localcluster variant used by `up-client-on-host` — P2P on `127.0.0.1`          |
@@ -397,20 +463,22 @@ your host firewall.
   (`hopr-lib/pix-secp256k1`) and enables PIX for the main tunnel session by
   default, while `binary-hoprd` takes hopr-lib's default `pix-bjj`. The curve is
   a network-wide invariant that nothing negotiates, so a `pix-bjj` exit refuses
-  every session this client opens (`UnacceptablePixParams`, logged on the node as
-  "refusing a client offering a PIX curve suite this node was not built for").
+  every session this client opens (`UnacceptablePixParams`, logged on the node
+  as "refusing a client offering a PIX curve suite this node was not built
+  for").
 - The client's post-connect tunnel ping is hardcoded to `10.128.0.1`
   (`ping::Options::default()` in `core::runner::tunnel_ping_loop`) and does not
-  read `[connection.ping] address`, which only the connect-time verification ping
-  honours. `gnosis_vpn-server`'s `docker/wggvpn.conf` puts the exit's WireGuard
-  interface on `10.129.0.1`, so that probe can never answer here and the client
-  tears the tunnel down and reconnects roughly every 90 s
-  ("tunnel ping exceeded max failures - reconnecting"). Connections still
-  establish, so the system tests pass, but nothing stays up for long.
-- PIX *settles* only if the exit also runs the `Pix` strategy, which is opt-in
-  and not part of hoprd's default strategy set. `hoprd-localcluster --enable-pix`
-  adds it, but its demo geometry caps the accepted per-SSA quota at 1 MiB, and
-  gnosis_vpn-client offers hopr-lib's default ≈649 MiB — so that flag cannot serve
-  this client as it stands, and the recipes don't pass it. Without it the exit
-  accepts PIX sessions (its default quota window covers the client's offer) but
-  never observes the deposits the client makes.
+  read `[connection.ping] address`, which only the connect-time verification
+  ping honours. `gnosis_vpn-server`'s `docker/wggvpn.conf` puts the exit's
+  WireGuard interface on `10.129.0.1`, so that probe can never answer here and
+  the client tears the tunnel down and reconnects roughly every 90 s ("tunnel
+  ping exceeded max failures - reconnecting"). Connections still establish, so
+  the system tests pass, but nothing stays up for long.
+- PIX _settles_ only if the exit also runs the `Pix` strategy, which is opt-in
+  and not part of hoprd's default strategy set.
+  `hoprd-localcluster --enable-pix` adds it, but its demo geometry caps the
+  accepted per-SSA quota at 1 MiB, and gnosis_vpn-client offers hopr-lib's
+  default ≈649 MiB — so that flag cannot serve this client as it stands, and the
+  recipes don't pass it. Without it the exit accepts PIX sessions (its default
+  quota window covers the client's offer) but never observes the deposits the
+  client makes.

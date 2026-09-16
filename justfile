@@ -33,6 +33,11 @@ METRICS_DATA_DIR := env_var_or_default("METRICS_DATA_DIR", "/tmp/hopr-metrics-da
 # Session hop count for destinations (0 = direct, 1+ = via relays)
 HOPS := env_var_or_default("HOPS", "1")
 
+# Non-empty starts the localcluster with `--enable-pix` and makes `gen-config` emit a PIX-enabled
+# client config sized to match it. One switch for both ends, because they only work in agreement —
+# see templates/pix-on.toml.tpl. Set by `up-pix`; `system-test-pix` needs it.
+CLUSTER_ENABLE_PIX := env_var_or_default("CLUSTER_ENABLE_PIX", "")
+
 # Log levels for each component (passed as RUST_LOG)
 CLIENT_LOG_LEVEL  := env_var_or_default("CLIENT_LOG_LEVEL",  "warn,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
 SERVER_LOG_LEVEL  := env_var_or_default("SERVER_LOG_LEVEL",  "info")
@@ -138,14 +143,18 @@ _cluster-start p2p_host:
         echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
         exit 1
     fi
+    if [ -n "{{CLUSTER_ENABLE_PIX}}" ]; then want_pix=yes; pix_flag="--enable-pix"; else want_pix=no; pix_flag=""; fi
     if [ "${cluster_state}" != "not_running" ]; then
         current_host=$(just _cluster-p2p-host)
-        if [ "${current_host}" = "${p2p_host}" ]; then
+        # PIX is written into the node configs at generation time, so a running cluster cannot be
+        # switched into or out of it — checked alongside the host for the same reason.
+        has_pix=$(just _cluster-has-pix)
+        if [ "${current_host}" = "${p2p_host}" ] && [ "${has_pix}" = "${want_pix}" ]; then
             pid=$(pgrep -f hoprd-localcluster | head -1)
-            echo "Cluster found in state '${cluster_state}' (PID ${pid}), already on P2P host ${p2p_host} — skipping start"
+            echo "Cluster found in state '${cluster_state}' (PID ${pid}), already on P2P host ${p2p_host} with PIX ${has_pix} — skipping start"
             exit 0
         fi
-        echo "Cluster is running with P2P host '${current_host}', but this recipe needs '${p2p_host}' — restarting with the correct host"
+        echo "Cluster is running with P2P host '${current_host}' and PIX ${has_pix}, but this recipe needs '${p2p_host}' with PIX ${want_pix} — restarting"
         just cluster-stop
     fi
     RUST_LOG={{CLUSTER_LOG_LEVEL}} \
@@ -155,8 +164,9 @@ _cluster-start p2p_host:
         --size        {{CLUSTER_SIZE}} \
         --p2p-host    "${p2p_host}" \
         --data-dir    "{{DATA_DIR}}" \
-        --extra-identities 1 &
-    echo "Localcluster PID: $! (P2P on ${p2p_host})"
+        --extra-identities 1 \
+        ${pix_flag} &
+    echo "Localcluster PID: $! (P2P on ${p2p_host}, PIX ${want_pix})"
 
 # Start localcluster (--extra-identities 1 pre-funds the client identity; P2P binds to the Docker gateway IP)
 cluster-start: network-create
@@ -279,8 +289,15 @@ gen-config:
         destinations+="${block}"$'\n'
     done < <(echo "${status}" | jq -c '.nodes[]')
 
-    DESTINATIONS="${destinations}" \
-        envsubst '$DESTINATIONS' \
+    # The PIX block has to agree with how the cluster was started, so it comes off the same switch.
+    if [ -n "{{CLUSTER_ENABLE_PIX}}" ]; then
+        pix_section=$(cat "{{TEMPLATES_DIR}}/pix-on.toml.tpl")
+    else
+        pix_section=$(cat "{{TEMPLATES_DIR}}/pix-off.toml.tpl")
+    fi
+
+    DESTINATIONS="${destinations}" PIX_SECTION="${pix_section}" \
+        envsubst '$DESTINATIONS,$PIX_SECTION' \
         < "{{TEMPLATES_DIR}}/client.toml.tpl" \
         > "{{CONFIG_DIR}}/client.toml"
 
@@ -531,6 +548,16 @@ system-tests *ARGS:
         RUST_LOG="{{SYSTEM_TEST_LOG_LEVEL}}" \
         "${test_binary}" --blokliUrl "${blokli_url}" {{ARGS}}
 
+# Drive a full PIX deposit → key recovery → sweep cycle and assert the exit's income (see pix/run.sh)
+system-test-pix *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    LOCALCLUSTER_BIN="{{LOCALCLUSTER_BIN}}" \
+    DATA_DIR="{{DATA_DIR}}" \
+    CONFIG_DIR="{{CONFIG_DIR}}" \
+    CLIENT_CONTAINER="gnosis_vpn-client" \
+        "{{justfile_directory()}}/pix/run.sh" {{ARGS}}
+
 # ─── End-to-end tests ────────────────────────────────────────────────────────
 
 # Build the e2e sidecar image (node + obscura + browser harness)
@@ -658,6 +685,12 @@ metrics-stop:
 # Bring the full stack up, including the client container
 up: build metrics-start cluster-start cluster-wait server-start gen-config client-start
     @just summary
+
+# Re-invoked rather than composed, because CLUSTER_ENABLE_PIX has to be set before `up`'s
+# dependencies are evaluated — it steers both the cluster flag and which PIX block gen-config emits.
+# Bring the full stack up with PIX enabled end to end (see pix/run.sh)
+up-pix:
+    CLUSTER_ENABLE_PIX=1 just up
 
 # See the caveat on client-start-on-host before using this instead of `up`
 # Bring the full stack up with the client running natively on the host instead of in Docker
@@ -791,6 +824,14 @@ _cluster-p2p-host:
     set -euo pipefail
     "{{LOCALCLUSTER_BIN}}" status --data-dir "{{DATA_DIR}}" 2>/dev/null \
         | jq -r '.nodes[0].p2p // empty' | sed -n 's/:[0-9]*$//p'
+
+# "yes"/"no" — whether the cluster's generated node configs carry a PIX strategy. Read off the
+# config on disk rather than the status JSON, which does not report it; `--enable-pix` is baked in
+# at generation time, so a running cluster cannot be switched either way.
+_cluster-has-pix:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if grep -qE '^\s+- Pix:' "{{DATA_DIR}}/hoprd_cfg_0.yaml" 2>/dev/null; then echo yes; else echo no; fi
 
 # Print <name>'s checked-out branch and commit, plus tag if HEAD is exactly tagged
 _component-version name dir:
