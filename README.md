@@ -130,14 +130,14 @@ just system-tests download --attempts 2
 
 ### Keeping hoprd and gnosis_vpn-client compatible
 
-The two have to be built against the **same `hopr-lib` revision**, and it is not
-enough for them to merely both be on `main`. `hopr-lib` is pinned by git rev in
-both repos — `Cargo.toml` in `hoprd`, transitively through `edgli` in
-`gnosis_vpn-client` — and the wire format changes between revs without a
-protocol version bump. hoprnet `7c7e0ed8` ("generation-tagged SURB
-consumption"), for instance, grew the SURB from 401 to 402 bytes, so a client
-and a node on either side of it cannot read each other's replies at all. What
-that looks like:
+The two have to be built against the **same `hopr-lib` commit**, and it is not
+enough for them to merely both be on `main`. `hoprd` pins it by rev;
+`gnosis_vpn-client` reaches it transitively through `edgli`, which tracks
+`branch = "master"`, so there the commit lives in `Cargo.lock` and moves on any
+`cargo update`. The wire format changes between commits without a protocol
+version bump: hoprnet `7c7e0ed8` ("generation-tagged SURB consumption"), for
+instance, grew the SURB from 401 to 402 bytes, so a client and a node on either
+side of it cannot read each other's replies at all. What that looks like:
 
 - `hoprd` node logs:
   `error while dispatching packet in the session manager error=invalid start protocol version`
@@ -151,14 +151,17 @@ same rev:
 
 ```sh
 grep -m1 -o 'rev = "[0-9a-f]*"' ../hoprd/Cargo.toml
-grep -o 'hoprnet?rev=[0-9a-f]*' ../gnosis_vpn-client/Cargo.lock | sort -u
+grep -o 'hoprnet?[^"]*#[0-9a-f]*' ../gnosis_vpn-client/Cargo.lock | sort -u
 ```
 
-The client's side of that is two pins that must agree with each other as well:
-`edgli` (which pins `hopr-lib` itself) and `hopr-utils-session`. More than one
-rev in the second command means Cargo is building hoprnet twice, which fails
-with `expected hopr_lib::HoprSessionClientConfig, found
-HoprSessionClientConfig`
+The second command has to print exactly **one** line, and its commit has to be
+the rev the first one prints. The client's side is two entries that must agree
+with each other as well — `edgli` (which pins `hopr-lib` itself) and
+`hopr-utils-session` — and they must agree in _form_, not just commit: Cargo
+keys a git source on the reference, so `branch = "master"` in one and
+`rev = "<sha>"` in the other are two sources even at the same commit. Either
+kind of disagreement builds hoprnet twice, and the duplicate types fail to unify
+(`expected hopr_lib::HoprSessionClientConfig, found HoprSessionClientConfig`)
 long before anything reaches the wire.
 
 ## Running the PIX system test
