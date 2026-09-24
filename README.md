@@ -210,6 +210,47 @@ credit the exit's Safe and its growth can only be required to be _at least_ the
 PIX income. The exactness is carried instead by the integer PIX counters and by
 `hopr_strategy_pix_last_sweep_hopr`, which is the wxHOPR of a single sweep.
 
+### Against the Curvy pool
+
+```sh
+just up-curvy          # up-pix, but settling through a local Curvy deployment
+just system-test-pix   # the same test; it reads the pool off the client image
+just down              # also removes the Curvy stack
+```
+
+`CLUSTER_PIX_POOL=curvy` (set by `up-curvy`) swaps both ends to the anonymous
+Baby JubJub pool: hoprd's `binary-hoprd-pix-curvy`, and the client's
+`docker-build-pix-curvy` image. The two have to change together, for the same
+curve reason as above.
+
+The Curvy deployment — chain with Blokli, relayer, indexer, batch prover and
+gateway, pinned by hoprd's `localcluster/curvy/release.json` — comes up first,
+through hoprd's `curvy-localcluster.sh --stack-only`. It is published on the
+Docker bridge's gateway so the host-native nodes and the client container reach
+it at one address; its gateway moves to `CURVY_GATEWAY_PORT` (3900), off
+node-0's API port. The cluster then runs on that chain instead of its own, and
+the stack's environment (`$CONFIG_DIR/curvy-stack.env`) reaches the nodes and
+the client container as the pool's `HOPRD_CURVY_*` overrides; the client also
+gets the proving keys mounted. The first `curvy-stack-up` pulls the release
+images and downloads the proving files, which takes a few minutes.
+
+What changes in the test is where the money moves:
+
+- **The client's Safe pays once.** Its first deposit shields a float (100 wxHOPR
+  by default) into the Curvy vault, and every later deposit is a private note
+  allocated out of it. Nothing on chain ties the client's Safe to the exit's
+  income — that is the pool's point — so the client's Safe is reported, not
+  asserted; the payment is carried by the exit's confirmed-deposit counter.
+- **The exit is paid net of the vault's withdrawal fee** (20 bps on the pinned
+  chain). Its income is asserted against a 1% fee ceiling
+  (`CURVY_FEE_CEILING_BPS`), and the fee one sweep actually paid is printed.
+
+A direct shield is the Safe calling the Curvy aggregator through its node
+management module, which forwards only to targets scoped into it. The cluster
+grants that once per Safe — its nodes' and the client's extra identity's — when
+`HOPRD_CURVY_SCOPE_AGGREGATOR` is set, as `up-curvy` does. A Safe without it
+fails its first shield with `NonExistentKey()`.
+
 ## Running the end-to-end browser tests
 
 ```sh
@@ -278,7 +319,9 @@ how to fetch them onto a bare machine.
 | `E2E_IMAGE`               | `gnosis_vpn-e2e`                                                          | Tag for the e2e browser sidecar image           |
 | `E2E_OUT_DIR`             | `/tmp/gnosis_vpn-testenv-e2e`                                             | Parent directory for e2e run output             |
 | `CLUSTER_ENABLE_PIX`      | unset                                                                     | Non-empty: `--enable-pix` + PIX client config   |
-| `HOPRD_BIN`               | `$HOPRD_DIR/result-hoprd/bin/hoprd`                                       | hoprd node binary the localcluster spawns       |
+| `CLUSTER_PIX_POOL`        | `test`                                                                    | PIX pool: `test`, or `curvy` (see above)        |
+| `CURVY_GATEWAY_PORT`      | `3900`                                                                    | Curvy gateway port (relayer, indexer)           |
+| `HOPRD_BIN`               | `$HOPRD_DIR/result-hoprd/bin/hoprd` (`result-hoprd-pix-curvy` for curvy)  | hoprd node binary the localcluster spawns       |
 | `LOCALCLUSTER_BIN`        | `$HOPRD_DIR/result-localcluster/bin/hoprd-localcluster`                   | Localcluster binary (override with `HOPRD_BIN`) |
 | `SYSTEM_TEST_WORKER_USER` | `gnosisvpn`                                                               | Worker user for `system-tests` (created if new) |
 | `SYSTEM_TEST_STATE_DIR`   | `/tmp/gnosis_vpn-testenv-system-tests`                                    | `system-tests` state home (wiped every run)     |
@@ -417,6 +460,9 @@ tunnel via the HOPR mixnet, both outbound).
 | `network-create`           | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`)    |
 | `network-remove`           | Removes `DOCKER_NETWORK` (runs as part of `clean`)                             |
 | `up-pix`                   | `up` with PIX enabled on the cluster and in the client config — see above      |
+| `up-curvy`                 | `up-pix` settling through a local Curvy deployment — see above                 |
+| `curvy-stack-up`           | Start the Curvy deployment the `curvy` pool settles through                    |
+| `curvy-stack-down`         | Stop it (also part of `down`)                                                  |
 | `system-test-pix`          | Drive a PIX cycle and assert the exit's income — see above                     |
 | `up-client-on-host`        | `up`, but the client runs natively on the host — see below                     |
 | `build-e2e`                | Builds the e2e browser sidecar image (runs as part of `e2e`)                   |

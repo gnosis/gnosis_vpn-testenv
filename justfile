@@ -8,11 +8,27 @@ CLUSTER_SIZE := env_var_or_default("CLUSTER_SIZE", "3")
 DATA_DIR     := env_var_or_default("DATA_DIR",     "/tmp/hopr-nodes")
 CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest")
 
+# The PIX deposit pool both ends settle through when PIX is on: `test` (visible secp256k1
+# transfers) or `curvy` (anonymous, through the Curvy deployment `curvy-stack-up` runs next to the
+# cluster). It picks the hoprd binary and the client image together, because the curve each pool
+# settles to is network-wide and never negotiated — see the note on build-cluster. Set by `up-curvy`.
+CLUSTER_PIX_POOL := env_var_or_default("CLUSTER_PIX_POOL", "test")
+HOPRD_PACKAGE    := if CLUSTER_PIX_POOL == "curvy" { "binary-hoprd-pix-curvy-x86_64-linux" } else { "binary-hoprd-pix-test-x86_64-linux" }
+HOPRD_RESULT     := if CLUSTER_PIX_POOL == "curvy" { "result-hoprd-pix-curvy" } else { "result-hoprd" }
+CLIENT_IMAGE     := if CLUSTER_PIX_POOL == "curvy" { "gnosis_vpn-client:pix-curvy" } else { "gnosis_vpn-client" }
+CLIENT_BUILD     := if CLUSTER_PIX_POOL == "curvy" { "docker-build-pix-curvy" } else { "docker-build" }
+
+# The Curvy stack is published on the Docker bridge's gateway, so the host-native nodes and the
+# client container reach it at the same address. Its gateway (relayer, indexer) moves off 3000,
+# which is node-0's API port; Blokli stays on 8080, where the cluster's own chain would be.
+CURVY_GATEWAY_PORT := env_var_or_default("CURVY_GATEWAY_PORT", "3900")
+CURVY_STACK_ENV    := CONFIG_DIR + "/curvy-stack.env"
+
 # The two cluster binaries. Default to what `build-cluster` produces; override to run against
 # binaries built some other way (e.g. `cargo build --release -p hoprd --features strategy-pix-test`
 # plus `-p hoprd-localcluster` in a checkout of another commit). Override them together: the
 # localcluster writes the node configs the hoprd binary then has to accept.
-HOPRD_BIN        := env_var_or_default("HOPRD_BIN",        HOPRD_DIR + "/result-hoprd/bin/hoprd")
+HOPRD_BIN        := env_var_or_default("HOPRD_BIN",        HOPRD_DIR + "/" + HOPRD_RESULT + "/bin/hoprd")
 LOCALCLUSTER_BIN := env_var_or_default("LOCALCLUSTER_BIN", HOPRD_DIR + "/result-localcluster/bin/hoprd-localcluster")
 
 # Docker network the client container joins to reach the (host-native) localcluster.
@@ -83,17 +99,19 @@ default:
 # node was not built for" in the node log) and no destination ever connects. `hoprd-localcluster`
 # is already built against hoprd's `strategy-pix-test`, so only the node binary was mismatched.
 # Build hoprd and hoprd-localcluster binaries via nix
+# With CLUSTER_PIX_POOL=curvy the node is the `pix-curvy` variant instead, and the client is built
+# with edgli's `pix-curvy` to match.
 build-cluster:
-    nix build -L --out-link {{HOPRD_DIR}}/result-hoprd        {{HOPRD_DIR}}#binary-hoprd-pix-test-x86_64-linux
+    nix build -L --out-link {{HOPRD_DIR}}/{{HOPRD_RESULT}} {{HOPRD_DIR}}#{{HOPRD_PACKAGE}}
     nix build -L --out-link {{HOPRD_DIR}}/result-localcluster {{HOPRD_DIR}}#binary-hoprd-localcluster
 
 # Build gnosis_vpn-server Docker image
 build-server:
     cd {{GVPN_SERVER_DIR}} && just docker-build
 
-# Build gnosis_vpn-client Docker image
+# Build gnosis_vpn-client Docker image (the `pix-curvy` variant under CLUSTER_PIX_POOL=curvy)
 build-client:
-    cd {{GVPN_CLIENT_DIR}} && just docker-build
+    cd {{GVPN_CLIENT_DIR}} && just {{CLIENT_BUILD}}
 
 # Build gnosis_vpn-client binaries only (no Docker image) — for the host-native client
 build-client-native:
@@ -118,6 +136,39 @@ network-create:
 # Remove the Docker network
 network-remove:
     docker network rm "{{DOCKER_NETWORK}}" 2>/dev/null || true
+
+# ─── Curvy stack ─────────────────────────────────────────────────────────────
+
+# Bring up the Curvy deployment a `curvy` pool settles through: chain + Blokli, relayer, indexer,
+# batch prover and gateway, from the release pinned in hoprd's localcluster/curvy. hoprd's launcher
+# does the work (`--stack-only`); what it hands back is the environment the nodes and the client need.
+curvy-stack-up: network-create
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f "{{CURVY_STACK_ENV}}" ] && [ -n "$(docker compose --project-name hopr-curvy-stack ps -q gateway 2>/dev/null)" ]; then
+        echo "Curvy stack already up — skipping (environment in {{CURVY_STACK_ENV}})"
+        exit 0
+    fi
+    mkdir -p "{{CONFIG_DIR}}"
+    log=$(mktemp)
+    CURVY_BIND_ADDR="{{DOCKER_NETWORK_GATEWAY}}" CURVY_GATEWAY_PORT="{{CURVY_GATEWAY_PORT}}" \
+        "{{HOPRD_DIR}}/localcluster/scripts/curvy-localcluster.sh" --stack-only 2>&1 | tee "${log}"
+    env_file=$(sed -n 's/.*environment in \(.*stack\.env\)$/\1/p' "${log}" | tail -1)
+    rm -f "${log}"
+    [ -f "${env_file}" ] || { echo "Error: the Curvy launcher did not report its environment file" >&2; exit 1; }
+    cp "${env_file}" "{{CURVY_STACK_ENV}}"
+    echo "Curvy stack environment saved to {{CURVY_STACK_ENV}}"
+
+# Tear the Curvy stack down (no-op when it is not up)
+curvy-stack-down:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    script="{{HOPRD_DIR}}/localcluster/scripts/curvy-localcluster.sh"
+    if [ -f "{{CURVY_STACK_ENV}}" ] || [ -n "$(docker compose --project-name hopr-curvy-stack ps -aq 2>/dev/null)" ]; then
+        [ -x "${script}" ] && "${script}" --down >/dev/null 2>&1
+        echo "Curvy stack stopped"
+    fi
+    rm -f "{{CURVY_STACK_ENV}}"
 
 # ─── Localcluster ────────────────────────────────────────────────────────────
 
@@ -156,6 +207,14 @@ _cluster-start p2p_host:
         fi
         echo "Cluster is running with P2P host '${current_host}' and PIX ${has_pix}, but this recipe needs '${p2p_host}' with PIX ${want_pix} — restarting"
         just cluster-stop
+    fi
+    if [ "{{CLUSTER_PIX_POOL}}" = "curvy" ]; then
+        # HOPRD_CHAIN_URL points the cluster at the Curvy chain instead of starting its own (so
+        # --chain-image below goes unused), HOPRD_CURVY_SCOPE_AGGREGATOR has it grant every Safe —
+        # the client's included — the aggregator target a direct shield needs, and the rest reaches
+        # the nodes' Curvy pools as their HOPRD_CURVY_* overrides.
+        [ -f "{{CURVY_STACK_ENV}}" ] || { echo "Error: no Curvy stack — run 'just curvy-stack-up' first" >&2; exit 1; }
+        . "{{CURVY_STACK_ENV}}"
     fi
     RUST_LOG={{CLUSTER_LOG_LEVEL}} \
         "${lc_bin}" \
@@ -213,7 +272,7 @@ cluster-stop:
     #!/usr/bin/env bash
     set -euo pipefail
     pkill -f hoprd-localcluster 2>/dev/null || true
-    pkill -f "result-hoprd/bin/hoprd" 2>/dev/null || true
+    pkill -f "result-hoprd[^/]*/bin/hoprd" 2>/dev/null || true
     docker rm -f hopr-chain 2>/dev/null || true
     # cluster recreates state everytime, so we can safely delete it on stop
     rm -rf "{{DATA_DIR}}"
@@ -340,6 +399,18 @@ client-start: network-create
     mkdir -p "{{CLIENT_STATE_DIR}}"
     blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url" | sed 's/localhost/host.docker.internal/')
     extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
+    # The client's embedded node is the PIX Entry, so under the Curvy pool it needs what the nodes
+    # get: the pool's HOPRD_CURVY_* overrides, and the proving keys it allocates deposits with.
+    curvy_args=()
+    if [ "{{CLUSTER_PIX_POOL}}" = "curvy" ]; then
+        [ -f "{{CURVY_STACK_ENV}}" ] || { echo "Error: no Curvy stack — run 'just curvy-stack-up' first" >&2; exit 1; }
+        . "{{CURVY_STACK_ENV}}"
+        curvy_args=(
+            --env HOPRD_CURVY_SHIELDING --env HOPRD_CURVY_SUBMISSION --env HOPRD_CURVY_RELAYER_URL
+            --env HOPRD_CURVY_NOTE_SOURCE --env HOPRD_CURVY_TOKEN
+            --env CURVY_ZK_KEYS_DIR=/curvy-zk --volume "${CURVY_ZK_KEYS_DIR}:/curvy-zk:ro"
+        )
+    fi
     docker run --detach --rm \
         --name gnosis_vpn-client \
         --network "{{DOCKER_NETWORK}}" \
@@ -355,7 +426,8 @@ client-start: network-create
         --env GNOSISVPN_CLIENT_AUTOSTART=30min \
         --volume "{{CONFIG_DIR}}:/config:ro" \
         --volume "{{CLIENT_STATE_DIR}}:/var/lib/gnosisvpn" \
-        gnosis_vpn-client
+        "${curvy_args[@]}" \
+        "{{CLIENT_IMAGE}}"
     sleep 1
     running=$(docker inspect gnosis_vpn-client 2>/dev/null | jq -r '.[0].State.Running // "false"')
     if [ "${running}" != "true" ]; then
@@ -692,6 +764,12 @@ up: build metrics-start cluster-start cluster-wait server-start gen-config clien
 up-pix:
     CLUSTER_ENABLE_PIX=1 just up
 
+# `up-pix` against the Curvy pool: the Curvy stack comes up first, and the cluster runs on its chain.
+# Bring the full stack up with PIX settling through Curvy (see pix/run.sh)
+up-curvy:
+    CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just build metrics-start curvy-stack-up cluster-start cluster-wait server-start gen-config client-start
+    @CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just summary
+
 # See the caveat on client-start-on-host before using this instead of `up`
 # Bring the full stack up with the client running natively on the host instead of in Docker
 up-client-on-host: build-cluster build-server build-client-native metrics-start cluster-start-on-host cluster-wait server-start gen-config client-start-on-host
@@ -853,7 +931,7 @@ _component-version name dir:
     fi
 
 # Tear the full stack down and purge client state (cluster always restarts with new identities)
-down: client-stop server-stop cluster-stop metrics-stop _purge-state
+down: client-stop server-stop cluster-stop curvy-stack-down metrics-stop _purge-state
 
 # Remove all generated configs, data, logs, chain container, and nix build results
 clean:
