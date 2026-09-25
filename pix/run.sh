@@ -19,6 +19,12 @@
 #   just system-test-pix
 #   just system-test-pix --seconds 300   # a longer window, so more cycles
 #
+# Against the Curvy pool (`just up-curvy`) the same cycle runs and the same counters are asserted, but
+# the money moves differently: the client's Safe pays once, shielding a float into the Curvy vault
+# that every deposit is then allocated out of, and the vault pays the exit less its withdrawal fee.
+# So the exit's income is asserted net of that fee, and the client's Safe is reported, not asserted.
+# The pool is read off the client image `up-curvy` starts; CLUSTER_PIX_POOL overrides it.
+#
 # Requires jq, curl, bc and docker. Budget ~5 minutes after the stack is up.
 
 set -uo pipefail
@@ -50,8 +56,13 @@ READY_TIMEOUT="${READY_TIMEOUT:-600}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-300}"
 DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-60}"
 # Deposit tracking polls for up to 30 s and the sweep is a further transaction, so give the last
-# in-flight cycle room to land after the traffic stops.
-SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-180}"
+# in-flight cycle room to land after the traffic stops. A Curvy sweep is a withdrawal proof plus its
+# transaction on top, so that pool gets longer (see below).
+SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-}"
+
+# Ceiling on the Curvy vault's withdrawal fee, in basis points, that the exit's income is allowed
+# to lose to it. The pinned local chain charges 20; hoprd's own soak sizes against the same 100.
+CURVY_FEE_CEILING_BPS="${CURVY_FEE_CEILING_BPS:-100}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -144,6 +155,21 @@ if [ "$(docker inspect "$CLIENT_CONTAINER" 2>/dev/null | jq -r '.[0].State.Runni
     exit 2
 fi
 
+# Which deposit pool this stack settles through: `up-curvy` starts the client from its `pix-curvy`
+# image, and the node binary it pairs with is chosen by the same switch.
+POOL="${CLUSTER_PIX_POOL:-}"
+if [ -z "$POOL" ]; then
+    case "$(docker inspect "$CLIENT_CONTAINER" 2>/dev/null | jq -r '.[0].Config.Image // empty')" in
+    *:pix-curvy) POOL="curvy" ;;
+    *) POOL="test" ;;
+    esac
+fi
+case "$POOL" in
+test) SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-180}" ;;
+curvy) SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-300}" ;;
+*) echo "CLUSTER_PIX_POOL must be 'test' or 'curvy', got '$POOL'" >&2; exit 2 ;;
+esac
+
 # Both halves of the switch, checked separately so the error says which one is wrong. A cluster
 # without the strategy fails the SSA request and closes the tunnel; a client config without PIX
 # connects perfectly and earns nothing, which would otherwise read as "PIX is broken".
@@ -202,12 +228,17 @@ echo "== PIX system test =================================================="
 printf '  exit:            %s (%s)\n' "$DEST" "$EXIT_API"
 printf '  dimensions:      %s x (%s + %s) -> quota %s B per SSA\n' \
     "$NUM_SSA_PARTS" "$SSA_PART_SIZE" "$ADDITIONAL_SHARES" "$QUOTA"
+printf '  pool:            %s\n' "$POOL"
 printf '  price:           %s wxHOPR/byte -> %s wxHOPR per cycle\n' "$PRICE_PER_BYTE" "$PER_CYCLE"
 printf '  traffic:         %s B ICMP every %ss for %ss through the tunnel to %s\n' \
     "$PING_SIZE" "$PING_INTERVAL" "$PING_SECONDS" "$TUNNEL_GATEWAY"
 echo "====================================================================="
 
 # ─── Connect ───────────────────────────────────────────────────────────────────
+
+# The Curvy pool's one Safe payment — the shield — happens on the first deposit, which can land
+# before the post-connect baseline below; the client's Safe is baselined here for that pool.
+CLIENT_SAFE_BEFORE_CONNECT=$(client_safe_wxhopr)
 
 echo "-- connect ${DEST}"
 ctl connect "$DEST" > /dev/null || { echo "connect rejected" >&2; exit 1; }
@@ -270,6 +301,13 @@ GENERATED=$(( GENERATED_AFTER - GENERATED_BEFORE ))
 EXIT_GAIN=$(calc "$EXIT_SAFE_AFTER - $EXIT_SAFE_BEFORE")
 CLIENT_SPENT=$(calc "$CLIENT_SAFE_BEFORE - $CLIENT_SAFE_AFTER")
 EXPECTED=$(calc "$N * $PER_CYCLE")
+if [ "$POOL" = "curvy" ]; then
+    # What the exit is owed after the vault's withdrawal fee, at the ceiling.
+    EXPECTED_EXIT=$(calc "$EXPECTED * (10000 - $CURVY_FEE_CEILING_BPS) / 10000")
+    CLIENT_SPENT=$(calc "$CLIENT_SAFE_BEFORE_CONNECT - $CLIENT_SAFE_AFTER")
+else
+    EXPECTED_EXIT="$EXPECTED"
+fi
 
 # ─── Assertions ────────────────────────────────────────────────────────────────
 
@@ -277,12 +315,25 @@ echo
 echo "== results =========================================================="
 printf '  cycles swept:    %s\n' "$N"
 printf '  exit safe:       %s -> %s  (+%s wxHOPR)\n' "$EXIT_SAFE_BEFORE" "$EXIT_SAFE_AFTER" "$EXIT_GAIN"
-printf '  client safe:     %s -> %s  (-%s wxHOPR)\n' "$CLIENT_SAFE_BEFORE" "$CLIENT_SAFE_AFTER" "$CLIENT_SPENT"
+if [ "$POOL" = "curvy" ]; then
+    printf '  client safe:     %s -> %s  (-%s wxHOPR from before connecting; only a shield moves it)\n' \
+        "$CLIENT_SAFE_BEFORE_CONNECT" "$CLIENT_SAFE_AFTER" "$CLIENT_SPENT"
+else
+    printf '  client safe:     %s -> %s  (-%s wxHOPR)\n' "$CLIENT_SAFE_BEFORE" "$CLIENT_SAFE_AFTER" "$CLIENT_SPENT"
+fi
 printf '  delivered:       %s B downstream, %s B covered by %s cycle(s)\n' "$DELIVERED" "$(( N * QUOTA ))" "$N"
 # Reported rather than asserted: with auto-redeeming on, ticket income can land in the same Safe, so
 # a ratio above the cycle count is legitimate. A whole number here is PIX and nothing else.
-[ "$N" -gt 0 ] && printf '  exit gain / cycle: %s (a whole number means PIX alone moved the Safe)\n' \
-    "$(calc "$EXIT_GAIN / $PER_CYCLE")"
+if [ "$N" -gt 0 ] && [ "$POOL" = "curvy" ]; then
+    # A Curvy sweep lands net of the vault's withdrawal fee, so the ratio is not whole; show what one
+    # sweep actually credited instead, and the fee that implies.
+    LAST_SWEEP=$(grep -E '^hopr_strategy_pix_last_sweep_hopr ' "$SCRAPE_AFTER" | awk '{ print $NF; exit }')
+    [ -n "$LAST_SWEEP" ] && printf '  exit gain / sweep: %s wxHOPR (%s per cycle less the vault fee: %s bps)\n' \
+        "$LAST_SWEEP" "$PER_CYCLE" "$(printf '%.1f' "$(calc "($PER_CYCLE - $LAST_SWEEP) / $PER_CYCLE * 10000")")"
+elif [ "$N" -gt 0 ]; then
+    printf '  exit gain / cycle: %s (a whole number means PIX alone moved the Safe)\n' \
+        "$(calc "$EXIT_GAIN / $PER_CYCLE")"
+fi
 echo "---------------------------------------------------------------------"
 
 check "$([ "$N" -ge 1 ] && echo 1 || echo 0)" \
@@ -295,10 +346,22 @@ check "$([ "$GENERATED" -ge "$N" ] && echo 1 || echo 0)" \
     "a deposit address per swept cycle" "generated +${GENERATED} >= sweeps +${N}"
 # `>=` rather than `==`: --enable-pix leaves auto-redeeming on, so winning tickets also credit the
 # exit's Safe. Only hoprd's own session_pix.rs, which disables it, can assert a whole multiple.
-check "$(ge "$EXIT_GAIN" "$EXPECTED" && echo 1 || echo 0)" \
-    "exit's Safe grew by at least the PIX income" "+${EXIT_GAIN} >= ${EXPECTED} wxHOPR"
-check "$(ge "$CLIENT_SPENT" "$EXPECTED" && echo 1 || echo 0)" \
-    "client paid what the exit earned" "-${CLIENT_SPENT} >= ${EXPECTED} wxHOPR"
+# Under Curvy the vault keeps its withdrawal fee, so the floor is the income net of the fee ceiling.
+check "$(ge "$EXIT_GAIN" "$EXPECTED_EXIT" && echo 1 || echo 0)" \
+    "exit's Safe grew by at least the PIX income" "+${EXIT_GAIN} >= ${EXPECTED_EXIT} wxHOPR"
+# Under Curvy the client's Safe pays only when it shields a float into the vault — once, on its first
+# deposit, not per cycle — and every later deposit is a private note allocated out of that float.
+# Nothing on chain ties the client's Safe to the exit's income; that is the pool's point. So a Safe
+# delta says whether this run happened to shield, not whether the client paid: reported, not
+# asserted. The payment itself is covered above — every sweep needs a deposit the exit confirmed,
+# and only the client's float can have produced it.
+if [ "$POOL" = "curvy" ]; then
+    printf '  INFO  %-46s %s\n' "client paid from its shielded float" \
+        "Safe -${CLIENT_SPENT} wxHOPR this run (the shield, if this run made it)"
+else
+    check "$(ge "$CLIENT_SPENT" "$EXPECTED" && echo 1 || echo 0)" \
+        "client paid what the exit earned" "-${CLIENT_SPENT} >= ${EXPECTED} wxHOPR"
+fi
 check "$([ "$DELIVERED" -ge "$(( N * QUOTA ))" ] && echo 1 || echo 0)" \
     "income corresponds to data delivered" "${DELIVERED} B >= ${N} x ${QUOTA} B"
 echo "====================================================================="
