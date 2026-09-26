@@ -1,0 +1,138 @@
+"""The in-cluster traffic target and the transfers against it. The target sits on its own Docker network with
+a non-private subnet (the client keeps RFC1918 off the tunnel); the exit NATs into it. `ip` is the address
+reached through the exit, `ip_direct` the one on the client's own network for no-VPN baselines."""
+import json
+import shlex
+import statistics as st
+
+from . import shell
+
+
+class Target:
+    http_port, echo_port, stream_port, call_port = 8899, 8901, 8902, 8903
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.name = cfg.target_name
+        if cfg.target_host:                      # an external target (production network): one address for both views
+            self.ip = self.ip_direct = cfg.target_host
+            self.external = True
+        else:
+            self.ip = self._ip(cfg.target_network)
+            self.ip_direct = self._ip(cfg.docker_network)
+            self.external = False
+
+    def _ip(self, network):
+        raw = shell.out(["docker", "inspect", self.name], timeout=30)
+        try:
+            return json.loads(raw)[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            return ""
+
+    def running(self):
+        return bool(self.ip)
+
+    def down_url(self, nbytes, host=None):
+        """The download URL, shell-quoted: every caller pastes it into an `sh -c` command in the sidecar, and the host
+        can come from TARGET_HOST / --target."""
+        return shlex.quote(f"http://{host or self.ip}:{self.http_port}/down?bytes={int(nbytes)}")
+
+    def up_url(self, host=None):
+        return shlex.quote(f"http://{host or self.ip}:{self.http_port}/up")
+
+
+def _curl_result(w, want):
+    """Parse curl's '%{http_code} %{size} %{time_total} %{time_starttransfer}'. A transfer is complete only with the
+    full byte count AND a 200: a non-200 body (a proxy or captive-portal page, a 429) is never a delivered payload."""
+    p = (w.split() + ["0", "0", "0", "0"])[:4]
+    code = p[0]
+    b = int(float(p[1] or 0))
+    t = float(p[2] or 0)
+    ttfb = float(p[3] or 0)
+    mbit = round(b * 8 / t / 1e6, 3) if t > 0 else 0
+    complete = b >= want and code == "200"
+    return {"code": code, "bytes": b, "elapsed": round(t, 2), "ttfb": round(ttfb, 2), "mbit": mbit, "complete": complete}
+
+
+def curl_down(client, host, nbytes, cap):
+    """Sized download from the target inside the client: {code, bytes, elapsed, ttfb, mbit, complete}."""
+    cap = int(cap)
+    url = shlex.quote(f"http://{host}:{Target.http_port}/down?bytes={int(nbytes)}")
+    w = client.out(f"curl -s -o /dev/null -m {cap} -w '%{{http_code}} %{{size_download}} %{{time_total}} %{{time_starttransfer}}' "
+                   f"{url} 2>/dev/null || true", timeout=cap + 30)
+    return _curl_result(w, nbytes)
+
+
+def curl_up(client, host, nbytes, cap):
+    cap, nbytes = int(cap), int(nbytes)
+    url = shlex.quote(f"http://{host}:{Target.http_port}/up")
+    client.exec(f"[ -f /tmp/up.bin ] && [ $(stat -c %s /tmp/up.bin) -eq {nbytes} ] || head -c {nbytes} /dev/zero > /tmp/up.bin", timeout=60)
+    w = client.out(f"curl -s -o /dev/null -m {cap} -w '%{{http_code}} %{{size_upload}} %{{time_total}} %{{time_starttransfer}}' "
+                   f"-H 'Content-Type: application/octet-stream' --data-binary @/tmp/up.bin "
+                   f"{url} 2>/dev/null || true", timeout=cap + 30)
+    return _curl_result(w, nbytes)
+
+
+def _series_summary(down, up):
+    return {"down_median": round(st.median([d["mbit"] for d in down]), 3) if down else 0,
+            "up_median": round(st.median([u["mbit"] for u in up]), 3) if up else 0,
+            "down_complete": sum(1 for d in down if d["complete"]),
+            "up_complete": sum(1 for u in up if u["complete"]),
+            "stall_max_s": max([x.get("stall_s") or 0 for x in down + up] or [0]),
+            "n": len(down)}
+
+
+def transfer_series(checks, client, label, host, reps, nbytes, cap, sizes=None):
+    """reps x [for each size: download, then upload] with per-second stall detection; one row per transfer.
+    `sizes` (bytes) cycles several payload sizes inside every rep; without it the one size is `nbytes`.
+    Returns the summary over every transfer plus `by_size` ({bytes: summary}) and the raw lists."""
+    sizes = list(sizes or [nbytes])
+    down, up = [], []
+    i = 0
+    for r in range(1, reps + 1):
+        for n in sizes:
+            i += 1
+            tag = f"{label}-d{i}"
+            client.persec_start(tag)
+            d = dict(curl_down(client, host, n, cap), want=n)
+            client.persec_stop()
+            d["stall_s"] = client.persec_stall(tag, "rx")
+            checks.row(label=label, dir="down", rep=r, bytes=n, res=d, stall_s=d["stall_s"])
+            down.append(d)
+            tag = f"{label}-u{i}"
+            client.persec_start(tag)
+            u = dict(curl_up(client, host, n, cap), want=n)
+            client.persec_stop()
+            u["stall_s"] = client.persec_stall(tag, "tx")
+            checks.row(label=label, dir="up", rep=r, bytes=n, res=u, stall_s=u["stall_s"])
+            up.append(u)
+    s = _series_summary(down, up)
+    s["reps"] = reps
+    s["by_size"] = {n: _series_summary([d for d in down if d["want"] == n], [u for u in up if u["want"] == n]) for n in sizes}
+    s["down"], s["up"] = down, up
+    return s
+
+
+def summary_row(s):
+    """The compact form of a transfer_series result for rows.jsonl."""
+    row = {k: s[k] for k in ("down_median", "up_median", "down_complete", "up_complete", "n", "reps")}
+    if len(s.get("by_size", {})) > 1:
+        row["by_size"] = s["by_size"]
+    return row
+
+
+def ping_rtts(client, host, count, interval=1, wait=3):
+    """In-tunnel ping RTTs (ms) from the client."""
+    txt = client.out(f"ping -c {int(count)} -i {interval} -W {wait} {shlex.quote(str(host))} 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2",
+                     timeout=count * (interval + wait) + 30)
+    return [float(x) for x in txt.split()]
+
+
+def ping_avg(client, host, count=5, interval=0.2, wait=2):
+    """Average RTT (ms) from ping's summary line, or None."""
+    txt = client.out(f"ping -c {int(count)} -i {interval} -W {wait} {shlex.quote(str(host))} 2>/dev/null | sed -n 's|.*= \\([0-9.]*\\)/\\([0-9.]*\\)/.*|\\2|p'",
+                     timeout=count * (interval + wait) + 30)
+    try:
+        return float(txt)
+    except ValueError:
+        return None

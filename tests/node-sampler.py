@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Host-side 1 Hz sampler for the regression suite (throughput, real-time-UDP, metric-sampling, capacity tests): per-node hoprd counters from
+/metrics, per-pid CPU% from /proc, and container CPU% from cgroup v2 cpu.stat. One JSON line per
+sample to --out. Stops on SIGTERM."""
+import argparse, json, os, sys, time, urllib.request, subprocess
+ap = argparse.ArgumentParser()
+ap.add_argument("--pids", default="")
+ap.add_argument("--urls", default="")
+ap.add_argument("--containers", default="")
+ap.add_argument("--interval", type=float, default=1.0)
+ap.add_argument("--out", required=True)
+a = ap.parse_args()
+# pids and urls are positional, one slot per cluster node: an empty slot (a node without a pid or api url) is kept
+# so node<i> and nodes[i] always mean cluster node i; a missing value samples as nothing, never as the next node
+pids = a.pids.split(",") if a.pids else []
+urls = a.urls.split(",") if a.urls else []
+containers = [c for c in a.containers.split(",") if c]
+KEYS = ("hopr_packets_count", "hopr_mixer_queue_size", "hopr_mixer_averaged_delay", "hopr_session_surb_buffer_estimate",
+        "hopr_session_surb_target_buffer", "hopr_packet_rejected_count", "hopr_egress_ring_buffer_dropped",
+        "hopr_surb_balancer_current_buffer_estimate", "hopr_surb_balancer_current_buffer_target", "hopr_surb_balancer_target",
+        "hopr_surb_balancer_surbs_rate")
+CLK = os.sysconf("SC_CLK_TCK")
+def pid_ticks(pid):
+    if not pid or not pid.isdigit():
+        return None
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            f = fh.read().rsplit(")", 1)[1].split()
+        return int(f[11]) + int(f[12])
+    except Exception:
+        return None
+_cpu_stat = {}     # container name -> its cgroup cpu.stat path; one docker inspect per container, not one per sample
+def cgroup_usage(name):
+    try:
+        p = _cpu_stat.get(name)
+        if p is None or not os.path.exists(p):      # first use, or the container was recreated with a new id
+            cid = subprocess.check_output(["docker", "inspect", "-f", "{{.Id}}", name], text=True, timeout=5).strip()
+            p = next((c for c in (f"/sys/fs/cgroup/system.slice/docker-{cid}.scope/cpu.stat", f"/sys/fs/cgroup/docker/{cid}/cpu.stat") if os.path.exists(c)), None)
+            _cpu_stat[name] = p
+        if p:
+            with open(p) as fh:
+                for line in fh:
+                    if line.startswith("usage_usec"):
+                        return int(line.split()[1])
+    except Exception:
+        pass
+    return None
+def scrape(url):
+    out = {}
+    if not url:
+        return out
+    try:
+        with urllib.request.urlopen(url + "/metrics", timeout=2) as resp:
+            txt = resp.read().decode()
+        for line in txt.splitlines():
+            if line.startswith("#"): continue
+            for k in KEYS:
+                if line.startswith(k):
+                    name, _, val = line.rpartition(" ")
+                    out[name] = float(val)
+    except Exception:
+        pass
+    return out
+prev_t = {p: pid_ticks(p) for p in pids}; prev_c = {c: cgroup_usage(c) for c in containers}; prev_time = time.time()
+with open(a.out, "a") as f:
+    while True:
+        time.sleep(a.interval)
+        now = time.time(); dt = now - prev_time; prev_time = now
+        row = {"t": round(now, 3), "nodes": [], "cpu_pct": {}, "container_cpu_pct": {}}
+        for i, p in enumerate(pids):
+            cur = pid_ticks(p)
+            if cur is not None and prev_t.get(p) is not None:
+                row["cpu_pct"][f"node{i}"] = round(100.0 * (cur - prev_t[p]) / CLK / dt, 1)
+            prev_t[p] = cur
+        for c in containers:
+            cur = cgroup_usage(c)
+            if cur is not None and prev_c.get(c) is not None:
+                row["container_cpu_pct"][c] = round(100.0 * (cur - prev_c[c]) / 1e6 / dt, 1)
+            prev_c[c] = cur
+        for i, u in enumerate(urls):
+            row["nodes"].append(scrape(u))
+        f.write(json.dumps(row) + "\n"); f.flush()
