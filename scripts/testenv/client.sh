@@ -4,10 +4,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "${HERE}/common.sh"
 
-: "${CONFIG_DIR:?}"
 : "${CLIENT_STATE_DIR:?}"
 
 start() {
+    : "${CONFIG_DIR:?}"
     : "${CLIENT_LOG_LEVEL:?}"
     : "${CLIENT_IMAGE:?}"
     : "${DOCKER_NETWORK:?}"
@@ -72,6 +72,7 @@ stop() {
 }
 
 start_on_host() {
+    : "${CONFIG_DIR:?}"
     : "${GVPN_CLIENT_DIR:?}"
     : "${CLIENT_WORKER_USER:?}"
     : "${CLIENT_LOG_LEVEL:?}"
@@ -112,6 +113,13 @@ start_on_host() {
     echo "Client PID: $!"
 }
 
+# Cascades SIGTERM to the worker via gnosis_vpn-root.
+stop_on_host() {
+    sudo pkill -f gnosis_vpn-root 2>/dev/null || true
+    sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
+    echo "Client (host) stopped"
+}
+
 # Escalates only when it has to. The *container's* entrypoint chowns this bind-mounted dir to its
 # internal worker uid, so the host user cannot remove it afterwards — but when the client ran on the
 # host, or never ran at all, the directory is plainly removable or absent. Asking for a password
@@ -141,7 +149,8 @@ case "${1:-}" in
 start) start ;;
 stop) stop ;;
 start-on-host) start_on_host ;;
+stop-on-host) stop_on_host ;;
 purge-state) purge_state ;;
 purge-state-interactive) purge_state_interactive ;;
-*) die "usage: client.sh start|stop|start-on-host|purge-state|purge-state-interactive" ;;
+*) die "usage: client.sh start|stop|start-on-host|stop-on-host|purge-state|purge-state-interactive" ;;
 esac

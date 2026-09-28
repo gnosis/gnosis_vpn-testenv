@@ -27,7 +27,14 @@ start() {
     echo "Started metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
 }
 
+stop() {
+    pkill -f "otelcol --config" 2>/dev/null || true
+    pkill -f "victoria-metrics" 2>/dev/null || true
+    echo "Metrics stopped"
+}
+
 case "${1:-}" in
 start) start ;;
-*) die "usage: metrics.sh start" ;;
+stop) stop ;;
+*) die "usage: metrics.sh start|stop" ;;
 esac

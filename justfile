@@ -213,9 +213,7 @@ client-start-on-host:
 
 # Stop the host-native client (cascades SIGTERM to the worker via gnosis_vpn-root)
 client-stop-on-host:
-    @sudo pkill -f gnosis_vpn-root 2>/dev/null || true
-    @sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
-    @echo "Client (host) stopped"
+    @scripts/testenv/client.sh stop-on-host
 
 # Tail the host-native client's log file
 client-logs-on-host:
@@ -236,92 +234,11 @@ purge-state:
 # Full tunnel: while it runs, this machine's traffic egresses through the exit under test.
 # Run gnosis_vpn-client system tests against the live local stack
 system-tests *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for artifact in client.toml extra_id.id extra_id.password blokli_url; do
-        if [ ! -f "{{CONFIG_DIR}}/${artifact}" ]; then
-            echo "Missing {{CONFIG_DIR}}/${artifact} — run 'just gen-config' first" >&2
-            exit 1
-        fi
-    done
-
-    # The runner brings up its own client on `extra_id.id` — the same identity `client-start` hands
-    # the container. Two nodes sharing one chain key announce the same peer twice and fight over the
-    # Safe, so the container has to be down first. (`up` starts it; use the recipes it composes.)
-    if docker container inspect gnosis_vpn-client > /dev/null 2>&1; then
-        echo "The gnosis_vpn-client container is running — it holds the same HOPR identity this" >&2
-        echo "test needs. Stop it first: just client-stop" >&2
-        exit 1
-    fi
-
-    # Resolved through the symlink, so what the unprivileged worker user is handed is the
-    # world-readable /nix/store path rather than one under someone's home directory.
-    root_binary=$(readlink -f "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"   2>/dev/null || true)
-    worker_binary=$(readlink -f "{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker" 2>/dev/null || true)
-    if [ ! -x "${root_binary}" ] || [ ! -x "${worker_binary}" ]; then
-        echo "Missing client binaries in {{GVPN_CLIENT_DIR}}/result/bin — run 'just build-client' first" >&2
-        exit 1
-    fi
-
-    # Its own flake output — `binary-gnosis_vpn-x86_64-linux` ships root/worker/ctl only.
-    nix build -L --out-link "{{GVPN_CLIENT_DIR}}/result-system-tests" \
-        "{{GVPN_CLIENT_DIR}}#binary-gnosis_vpn-system_tests"
-    test_binary="{{GVPN_CLIENT_DIR}}/result-system-tests/bin/gnosis_vpn-system_tests"
-
-    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
-    identity_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
-
-    # Name the resolved target up front, so a failed run does not need this recipe to explain itself
-    echo "=== system test target ==="
-    echo "  blokli:      ${blokli_url}"
-    grep -o '^\[destinations\.[^]]*\]' "{{CONFIG_DIR}}/client.toml" | sed 's/^/  destination: /' || true
-    echo "  config:      {{CONFIG_DIR}}/client.toml"
-    echo "  root:        ${root_binary}"
-    echo "  worker:      ${worker_binary}"
-    echo "  runner:      $(readlink -f "${test_binary}")"
-    echo "  worker user: {{SYSTEM_TEST_WORKER_USER}}"
-    echo "  state home:  {{SYSTEM_TEST_STATE_DIR}}"
-    echo "=========================="
-
-    # Refresh the sudo credential timestamp so the long run below doesn't hit a prompt later
-    sudo -v
-
-    if ! getent passwd "{{SYSTEM_TEST_WORKER_USER}}" > /dev/null 2>&1; then
-        # No home of its own: the state directory is handed over explicitly via GNOSISVPN_HOME below.
-        sudo useradd --system --user-group --no-create-home \
-            --home-dir "{{SYSTEM_TEST_STATE_DIR}}" "{{SYSTEM_TEST_WORKER_USER}}"
-        echo "Created system user {{SYSTEM_TEST_WORKER_USER}}"
-    fi
-
-    # `cluster-stop` wipes DATA_DIR and the chain container, so every cluster comes up with a new
-    # chain: a state home from an earlier run caches a Safe address that no longer exists on it.
-    # Wiped rather than reused, which is why this is a dedicated directory and not CLIENT_STATE_DIR.
-    sudo rm -rf "{{SYSTEM_TEST_STATE_DIR}}"
-    sudo mkdir -p "{{SYSTEM_TEST_STATE_DIR}}"
-    sudo chown "{{SYSTEM_TEST_WORKER_USER}}:{{SYSTEM_TEST_WORKER_USER}}" "{{SYSTEM_TEST_STATE_DIR}}"
-
-    # sudo's env_reset drops the environment, so every variable the spawned gnosis_vpn-root needs
-    # is restated here as an assignment on the command line.
-    sudo \
-        CARGO_BIN_EXE_GNOSIS_VPN_ROOT="${root_binary}" \
-        GNOSISVPN_CONFIG_PATH="{{CONFIG_DIR}}/client.toml" \
-        GNOSISVPN_HOME="{{SYSTEM_TEST_STATE_DIR}}" \
-        GNOSISVPN_WORKER_USER="{{SYSTEM_TEST_WORKER_USER}}" \
-        GNOSISVPN_WORKER_BINARY="${worker_binary}" \
-        GNOSISVPN_HOPR_IDENTITY_FILE="{{CONFIG_DIR}}/extra_id.id" \
-        GNOSISVPN_HOPR_IDENTITY_PASS="${identity_pass}" \
-        RUST_LOG="{{SYSTEM_TEST_LOG_LEVEL}}" \
-        "${test_binary}" --blokliUrl "${blokli_url}" {{ARGS}}
+    @scripts/testenv/system-tests.sh {{ARGS}}
 
 # Drive a full PIX deposit → key recovery → sweep cycle and assert the exit's income (see pix/run.sh)
 system-test-pix *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    LOCALCLUSTER_BIN="{{LOCALCLUSTER_BIN}}" \
-    DATA_DIR="{{DATA_DIR}}" \
-    CONFIG_DIR="{{CONFIG_DIR}}" \
-    CLIENT_CONTAINER="gnosis_vpn-client" \
-        "{{justfile_directory()}}/pix/run.sh" {{ARGS}}
+    @CLIENT_CONTAINER=gnosis_vpn-client pix/run.sh {{ARGS}}
 
 # ─── End-to-end tests ────────────────────────────────────────────────────────
 
@@ -331,17 +248,7 @@ build-e2e:
 
 # Drive a headless browser through the tunnel for every destination (see e2e/README.md)
 e2e *ARGS: build-e2e
-    #!/usr/bin/env bash
-    set -euo pipefail
-    E2E_IMAGE="{{E2E_IMAGE}}" \
-    E2E_OUT_DIR="{{E2E_OUT_DIR}}" \
-    CLUSTER_SIZE="{{CLUSTER_SIZE}}" \
-    SERVER_COUNT="{{SERVER_COUNT}}" \
-    HOPS="{{HOPS}}" \
-    GVPN_CLIENT_DIR="{{GVPN_CLIENT_DIR}}" \
-    GVPN_SERVER_DIR="{{GVPN_SERVER_DIR}}" \
-    HOPRD_DIR="{{HOPRD_DIR}}" \
-        "{{justfile_directory()}}/e2e/run.sh" {{ARGS}}
+    @e2e/run.sh {{ARGS}}
 
 # Mirrors how `system-tests` owns its daemon instead of attaching to a pre-running one.
 # Needs sudo (WireGuard + routing table) and a pre-existing worker user — macOS has no
@@ -349,46 +256,7 @@ e2e *ARGS: build-e2e
 # Full tunnel: while it runs, this machine's traffic egresses through the exit under test.
 # Run the e2e browser suite against a real network (rotsee etc), starting our own client
 e2e-on-network *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    : "${E2E_ROOT_BINARY:?E2E_ROOT_BINARY must point at a gnosis_vpn-root binary for this host}"
-    : "${E2E_WORKER_BINARY:?E2E_WORKER_BINARY must point at a gnosis_vpn-worker binary for this host}"
-    : "${E2E_CONFIG:?E2E_CONFIG must point at a client config (e.g. rotsee.toml)}"
-    : "${E2E_IDENTITY_FILE:?E2E_IDENTITY_FILE must point at the HOPR identity file}"
-    : "${E2E_IDENTITY_PASS_FILE:?E2E_IDENTITY_PASS_FILE must point at a file holding the identity password}"
-    : "${E2E_BLOKLI_URL:?E2E_BLOKLI_URL must be set (e.g. https://blokli.rotsee.hoprnet.link)}"
-
-    # gnosis_vpn-worker runs unprivileged, so its binary/identity/config must be readable by
-    # E2E_WORKER_USER — a path under someone's home usually is not. Stage into a world-readable dir.
-    stage="${E2E_STAGE_DIR:-/tmp/gnosis_vpn-e2e-stage}"
-    rm -rf "${stage}"; mkdir -p "${stage}"
-    cp "${E2E_ROOT_BINARY}"   "${stage}/gnosis_vpn-root"
-    cp "${E2E_WORKER_BINARY}" "${stage}/gnosis_vpn-worker"
-    cp "${E2E_CONFIG}"        "${stage}/config.toml"
-    cp "${E2E_IDENTITY_FILE}" "${stage}/identity.id"
-    # Default to the .safe sitting next to the identity, as gnosis_vpn lays it out
-    safe_file="${E2E_IDENTITY_SAFE_FILE:-${E2E_IDENTITY_FILE%.id}.safe}"
-    if [ -f "${safe_file}" ]; then
-        cp "${safe_file}" "${stage}/identity.safe"
-    else
-        echo "WARNING: no .safe found next to the identity (${safe_file}); the client will try to onboard a NEW safe" >&2
-    fi
-    chmod -R a+rX "${stage}"
-    chmod a+rx "${stage}/gnosis_vpn-root" "${stage}/gnosis_vpn-worker"
-
-    E2E_IMAGE="{{E2E_IMAGE}}" \
-    E2E_OUT_DIR="{{E2E_OUT_DIR}}" \
-    CLIENT_MODE=spawn \
-    WORKER_USER="${E2E_WORKER_USER:-gnosisvpn-dev}" \
-    GVPN_ROOT_BIN="${stage}/gnosis_vpn-root" \
-    GVPN_WORKER_BIN="${stage}/gnosis_vpn-worker" \
-    GVPN_CONFIG="${stage}/config.toml" \
-    GVPN_IDENTITY_FILE="${stage}/identity.id" \
-    GVPN_IDENTITY_PASS="$(cat "${E2E_IDENTITY_PASS_FILE}")" \
-    GVPN_IDENTITY_SAFE="$([ -f "${stage}/identity.safe" ] && echo "${stage}/identity.safe" || echo "")" \
-    GVPN_BLOKLI_URL="${E2E_BLOKLI_URL}" \
-    PING_TARGETS="${PING_TARGETS:-1.1.1.1,10.128.0.1}" \
-        "{{justfile_directory()}}/e2e/run.sh" {{ARGS}}
+    @scripts/testenv/e2e-on-network.sh {{ARGS}}
 
 # ─── Scripts ─────────────────────────────────────────────────────────────────
 
@@ -420,9 +288,7 @@ metrics-start:
 
 # Stop otelcol and VictoriaMetrics
 metrics-stop:
-    @pkill -f "otelcol --config" 2>/dev/null || true
-    @pkill -f "victoria-metrics" 2>/dev/null || true
-    @echo "Metrics stopped"
+    @scripts/testenv/metrics.sh stop
 
 # ─── Composite ───────────────────────────────────────────────────────────────
 
