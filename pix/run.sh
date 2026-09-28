@@ -101,6 +101,21 @@ client_safe_wxhopr() {
     ctl_json balance | jq -r '.Balance.Ok.safe // empty' | awk 'NF { print $1; exit }'
 }
 
+# Whether the client's Safe module has the Curvy aggregator as a target ("true"/"false"), asked of
+# the Curvy stack's chain container, which `up-curvy` records in curvy-stack.env.
+client_module_scopes_aggregator() {
+    local project chain module aggregator
+    project=$(. "${CONFIG_DIR}/curvy-stack.env" && printf '%s' "${CURVY_STACK_PROJECT:-}")
+    chain=$(docker ps -q --filter "label=com.docker.compose.project=${project}" \
+        --filter "label=com.docker.compose.service=chain" | head -1)
+    module=$(status_json | jq -r '.extras[0].module_address // empty')
+    aggregator=$(docker exec "$chain" cat /data/curvy_deployed_addresses.json |
+        jq -r '.["CurvyAggregator#CurvyAggregatorAlphaV2"] // .["CurvyAggregator#ERC1967Proxy"]')
+    [ -n "$chain" ] && [ -n "$module" ] && [ -n "$aggregator" ] || return 0
+    docker exec "$chain" cast call "$module" 'tryGetTarget(address)(bool,uint256)' "$aggregator" \
+        --rpc-url http://127.0.0.1:8545 2>/dev/null | head -1
+}
+
 # bc with a sane default scale, so 21-digit wxHOPR amounts do not overflow shell arithmetic.
 calc() { printf 'scale=12; %s\n' "$1" | bc -l; }
 ge() { [ "$(calc "$1 >= $2")" = "1" ]; }
@@ -358,6 +373,12 @@ check "$(ge "$EXIT_GAIN" "$EXPECTED_EXIT" && echo 1 || echo 0)" \
 if [ "$POOL" = "curvy" ]; then
     printf '  INFO  %-46s %s\n' "client paid from its shielded float" \
         "Safe -${CLIENT_SPENT} wxHOPR this run (the shield, if this run made it)"
+    # The shield goes through the chain's shield router, a `send` on wxHOPR that every node Safe
+    # may make from deployment, so the client's module must still not name the aggregator: a grant
+    # is exactly the Safe change this flow exists to avoid.
+    SCOPED=$(client_module_scopes_aggregator)
+    check "$([ "$SCOPED" = "false" ] && echo 1 || echo 0)" \
+        "client shielded without an aggregator grant" "tryGetTarget(aggregator) -> ${SCOPED:-unknown}"
 else
     check "$(ge "$CLIENT_SPENT" "$EXPECTED" && echo 1 || echo 0)" \
         "client paid what the exit earned" "-${CLIENT_SPENT} >= ${EXPECTED} wxHOPR"

@@ -245,11 +245,11 @@ What changes in the test is where the money moves:
   chain). Its income is asserted against a 1% fee ceiling
   (`CURVY_FEE_CEILING_BPS`), and the fee one sweep actually paid is printed.
 
-A direct shield is the Safe calling the Curvy aggregator through its node
-management module, which forwards only to targets scoped into it. The cluster
-grants that once per Safe — its nodes' and the client's extra identity's — when
-`HOPRD_CURVY_SCOPE_AGGREGATOR` is set, as `up-curvy` does. A Safe without it
-fails its first shield with `NonExistentKey()`.
+A direct shield never touches the Safe's permissions. Through its node
+management module the Safe ERC-777-`send`s wxHOPR — a target every node Safe
+has from deployment — to the chain's Curvy shield router, whose hook calls the
+aggregator's `directShield` in the same transaction. `system-test-pix` asserts
+that the client's module still has no aggregator target afterwards.
 
 ## Running the end-to-end browser tests
 

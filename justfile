@@ -210,9 +210,9 @@ _cluster-start p2p_host:
     fi
     if [ "{{CLUSTER_PIX_POOL}}" = "curvy" ]; then
         # HOPRD_CHAIN_URL points the cluster at the Curvy chain instead of starting its own (so
-        # --chain-image below goes unused), HOPRD_CURVY_SCOPE_AGGREGATOR has it grant every Safe —
-        # the client's included — the aggregator target a direct shield needs, and the rest reaches
-        # the nodes' Curvy pools as their HOPRD_CURVY_* overrides.
+        # --chain-image below goes unused), and the rest reaches the nodes' Curvy pools as their
+        # HOPRD_CURVY_* overrides. No Safe is granted anything: shields go through the chain's
+        # Curvy shield router, which a freshly deployed Safe can already reach.
         [ -f "{{CURVY_STACK_ENV}}" ] || { echo "Error: no Curvy stack — run 'just curvy-stack-up' first" >&2; exit 1; }
         . "{{CURVY_STACK_ENV}}"
     fi
