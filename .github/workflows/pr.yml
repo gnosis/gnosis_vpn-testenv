@@ -36,6 +36,7 @@ jobs:
         uses: hoprnet/hopr-workflows/actions/nix-action@ade4bbd75f7204255c61d19c23f67d3da221e7d2 # nix-action-v1.1.3
         with:
           source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+          cachix_cache_name: hoprnet
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           command: nix develop -c just test-scripts
   ci-ok:
