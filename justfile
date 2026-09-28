@@ -45,7 +45,7 @@ DOCKER_NETWORK_GATEWAY := env_var_or_default("DOCKER_NETWORK_GATEWAY", "172.30.0
 # VPN server settings
 SERVER_COUNT := env_var_or_default("SERVER_COUNT", "1")
 
-# Override for _lan-ip's auto-detection (multi-NIC hosts, or when the default route is wrong)
+# Override for the LAN IP auto-detection (multi-NIC hosts, or when the default route is wrong)
 LAN_IP := env_var_or_default("LAN_IP", "")
 
 # Data directory for VictoriaMetrics on-disk storage
@@ -86,6 +86,7 @@ SYSTEM_TEST_LOG_LEVEL   := env_var_or_default("SYSTEM_TEST_LOG_LEVEL",   "info,g
 # Generated config output dir
 CONFIG_DIR    := env_var_or_default("CONFIG_DIR", "/tmp/gnosis_vpn-testenv")
 TEMPLATES_DIR := justfile_directory() + "/templates"
+REPO_DIR      := justfile_directory()
 
 # Files a remote client needs, bundled together for up-on-network (see gen-config-on-network)
 NETWORK_BUNDLE_DIR := CONFIG_DIR + "/on-network"
@@ -129,7 +130,7 @@ build: build-cluster build-server build-client
 
 # Create the fixed-subnet Docker network joining the client container to the host-native localcluster
 network-create:
-    scripts/testenv/network.sh create
+    @scripts/testenv/network.sh create
 
 # Remove the Docker network
 network-remove:
@@ -141,100 +142,79 @@ network-remove:
 # batch prover and gateway, from the release pinned in hoprd's localcluster/curvy. hoprd's launcher
 # does the work (`--stack-only`); what it hands back is the environment the nodes and the client need.
 curvy-stack-up: network-create
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -f "{{CURVY_STACK_ENV}}" ] && [ -n "$(docker compose --project-name hopr-curvy-stack ps -q gateway 2>/dev/null)" ]; then
-        echo "Curvy stack already up — skipping (environment in {{CURVY_STACK_ENV}})"
-        exit 0
-    fi
-    mkdir -p "{{CONFIG_DIR}}"
-    log=$(mktemp)
-    CURVY_BIND_ADDR="{{DOCKER_NETWORK_GATEWAY}}" CURVY_GATEWAY_PORT="{{CURVY_GATEWAY_PORT}}" \
-        "{{HOPRD_DIR}}/localcluster/scripts/curvy-localcluster.sh" --stack-only 2>&1 | tee "${log}"
-    env_file=$(sed -n 's/.*environment in \(.*stack\.env\)$/\1/p' "${log}" | tail -1)
-    rm -f "${log}"
-    [ -f "${env_file}" ] || { echo "Error: the Curvy launcher did not report its environment file" >&2; exit 1; }
-    cp "${env_file}" "{{CURVY_STACK_ENV}}"
-    echo "Curvy stack environment saved to {{CURVY_STACK_ENV}}"
+    @scripts/testenv/curvy.sh up
 
 # Tear the Curvy stack down (no-op when it is not up)
 curvy-stack-down:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    script="{{HOPRD_DIR}}/localcluster/scripts/curvy-localcluster.sh"
-    if [ -f "{{CURVY_STACK_ENV}}" ] || [ -n "$(docker compose --project-name hopr-curvy-stack ps -aq 2>/dev/null)" ]; then
-        [ -x "${script}" ] && "${script}" --down >/dev/null 2>&1
-        echo "Curvy stack stopped"
-    fi
-    rm -f "{{CURVY_STACK_ENV}}"
+    @scripts/testenv/curvy.sh down
 
 # ─── Localcluster ────────────────────────────────────────────────────────────
 
 # Start localcluster (--extra-identities 1 pre-funds the client identity; P2P binds to the Docker gateway IP)
 cluster-start: network-create
-    scripts/testenv/cluster.sh start {{DOCKER_NETWORK_GATEWAY}}
+    @scripts/testenv/cluster.sh start {{DOCKER_NETWORK_GATEWAY}}
 
 # Start localcluster for a host-native client (see up-client-on-host); P2P binds to loopback instead of the Docker gateway
 cluster-start-on-host:
-    scripts/testenv/cluster.sh start 127.0.0.1
+    @scripts/testenv/cluster.sh start 127.0.0.1
 
 # Start localcluster reachable from other machines on the LAN (see up-on-network); P2P binds/announces LAN_IP
 cluster-start-on-network:
-    scripts/testenv/cluster.sh start-on-network
+    @scripts/testenv/cluster.sh start-on-network
 
 # Poll until cluster reaches state=running
 cluster-wait:
-    scripts/testenv/cluster.sh wait
+    @scripts/testenv/cluster.sh wait
 
 # Print live cluster status as JSON
 cluster-status:
-    scripts/testenv/cluster.sh status
+    @scripts/testenv/cluster.sh status
 
 # Stop localcluster
 cluster-stop:
-    scripts/testenv/cluster.sh stop
+    @scripts/testenv/cluster.sh stop
 
 # ─── VPN Servers ─────────────────────────────────────────────────────────────
 
 # Start SERVER_COUNT gnosis_vpn-server containers (server-i: WireGuard 51821+i/udp, API 8000+i)
 server-start:
-    scripts/testenv/server.sh start
+    @scripts/testenv/server.sh start
 
 # Stop all VPN server containers
 server-stop:
-    scripts/testenv/server.sh stop
+    @scripts/testenv/server.sh stop
 
 # ─── Config generation ───────────────────────────────────────────────────────
 
 # Derive client config and system-test artifacts from live cluster status
 gen-config:
-    scripts/testenv/config.sh gen
+    @scripts/testenv/config.sh gen
 
 # Derive a LAN-reachable client config + blokli URL for a client running on another machine (see up-on-network)
 gen-config-on-network: gen-config
-    scripts/testenv/config.sh gen-on-network
+    @scripts/testenv/config.sh gen-on-network
 
 # ─── Client ──────────────────────────────────────────────────────────────────
 
 # Start the gnosis_vpn-client container (CAP_NET_ADMIN, no sudo needed — see README)
 client-start: network-create
-    scripts/testenv/client.sh start
+    @scripts/testenv/client.sh start
 
 # Stop the client, wherever it's running (container or host-native — used by down)
 client-stop:
-    scripts/testenv/client.sh stop
+    @scripts/testenv/client.sh stop
 
 # Reintroduces the routing-loop risk the container was built to avoid (see README "Why the
 # client runs in its own container") if gnosis_vpn-server shares the host's egress — don't run
 # this alongside `client-start`, they'd collide over CLIENT_STATE_DIR and the default control socket.
 # Start gnosis_vpn-client as a native host process instead of in Docker (dev/debug convenience)
 client-start-on-host:
-    scripts/testenv/client.sh start-on-host
+    @scripts/testenv/client.sh start-on-host
 
 # Stop the host-native client (cascades SIGTERM to the worker via gnosis_vpn-root)
 client-stop-on-host:
-    sudo pkill -f gnosis_vpn-root 2>/dev/null || true
-    sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
+    @sudo pkill -f gnosis_vpn-root 2>/dev/null || true
+    @sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
     @echo "Client (host) stopped"
 
 # Tail the host-native client's log file
@@ -243,7 +223,7 @@ client-logs-on-host:
 
 # Remove all persistent worker state (identity keys, cache) from CLIENT_STATE_DIR
 purge-state:
-    scripts/testenv/client.sh purge-state-interactive
+    @scripts/testenv/client.sh purge-state-interactive
 
 # ─── System tests ────────────────────────────────────────────────────────────
 
@@ -436,34 +416,13 @@ test-scripts:
 
 # Start otelcol (OTLP HTTP on 127.0.0.1:4318) and VictoriaMetrics (PromQL UI on :8428)
 metrics-start:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    configs_dir="{{justfile_directory()}}/configs"
-
-    otelcol_running=$(pgrep -f "otelcol --config" 2>/dev/null || true)
-    if [ -n "${otelcol_running}" ]; then
-        echo "Metrics found (PID ${otelcol_running}) — skipping start"
-        echo "  OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
-        exit 0
-    fi
-
-    mkdir -p "{{METRICS_DATA_DIR}}"
-
-    otelcol --config "${configs_dir}/otelcol.yaml" > /tmp/hopr-otelcol.log 2>&1 &
-    victoria-metrics \
-        -storageDataPath "{{METRICS_DATA_DIR}}" \
-        -httpListenAddr "127.0.0.1:8428" \
-        > /tmp/hopr-victoriametrics.log 2>&1 &
-
-    echo "Started metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
+    @scripts/testenv/metrics.sh start
 
 # Stop otelcol and VictoriaMetrics
 metrics-stop:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    pkill -f "otelcol --config" 2>/dev/null || true
-    pkill -f "victoria-metrics" 2>/dev/null || true
-    echo "Metrics stopped"
+    @pkill -f "otelcol --config" 2>/dev/null || true
+    @pkill -f "victoria-metrics" 2>/dev/null || true
+    @echo "Metrics stopped"
 
 # ─── Composite ───────────────────────────────────────────────────────────────
 
@@ -494,140 +453,20 @@ up-on-network: build-cluster build-server metrics-start cluster-start-on-network
 
 # Print how to control the running client and component versions
 summary:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo ""
-    echo "── Gnosis VPN test stack ──────────────────────────────────────"
-    echo ""
-    echo "Control the client:"
-    echo "  docker exec -it gnosis_vpn-client gnosis_vpn-ctl status"
-    echo "  docker exec -it gnosis_vpn-client gnosis_vpn-ctl connect <destination-id>"
-    echo "  docker logs -f gnosis_vpn-client"
-    echo ""
-    echo "Component versions:"
-    just _component-version "gnosis_vpn-client" "{{GVPN_CLIENT_DIR}}"
-    just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
-    just _component-version "hoprd"             "{{HOPRD_DIR}}"
-    echo ""
-    echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
-    echo "─────────────────────────────────────────────────────────────────"
+    @scripts/testenv/summary.sh default
 
 # Print how to control the host-native client and component versions
 summary-host-client:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo ""
-    echo "── Gnosis VPN test stack (client on host) ─────────────────────"
-    echo ""
-    echo "Control the client:"
-    echo "  {{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-ctl status"
-    echo "  {{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-ctl connect <destination-id>"
-    echo "  just client-logs-on-host"
-    echo ""
-    echo "Component versions:"
-    just _component-version "gnosis_vpn-client" "{{GVPN_CLIENT_DIR}}"
-    just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
-    just _component-version "hoprd"             "{{HOPRD_DIR}}"
-    echo ""
-    echo "Metrics — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
-    echo "─────────────────────────────────────────────────────────────────"
+    @scripts/testenv/summary.sh host-client
 
 # Print what to copy/run on the other machine, the required firewall ports, and component versions
 summary-on-network:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    lan_ip=$(just _lan-ip)
-    remote_user=$(whoami)
-    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url-on-network")
-    bundle_dir="/tmp/gnosis_vpn-on-network"
-    worker_home="/home/{{CLIENT_WORKER_USER}}"
-    echo ""
-    echo "── Gnosis VPN test stack (reachable on the LAN at ${lan_ip}) ───"
-    echo ""
-    echo "On the other machine, from a gnosis_vpn-client checkout built with"
-    echo "'cargo build --release':"
-    echo "  1. Pull the bundled config/identity files from this host, into a"
-    echo "     world-readable location — gnosis_vpn-worker reads the identity"
-    echo "     file as an unprivileged user, so it can't sit under your home dir:"
-    echo "       rsync -avz ${remote_user}@${lan_ip}:{{NETWORK_BUNDLE_DIR}}/ ${bundle_dir}/"
-    echo "  2. Make sure worker user '{{CLIENT_WORKER_USER}}' exists on that machine too"
-    echo "     (gnosis_vpn-root drops privileges to it when spawning gnosis_vpn-worker)"
-    echo "  3. The worker binary has the same problem as the identity file above —"
-    echo "     target/release sits under your home dir, unreachable for the worker"
-    echo "     user (a nix build wouldn't need this, its result lives in the"
-    echo "     world-readable /nix/store). Copy it out and hand it to the worker user:"
-    echo "       sudo rm -f ${worker_home}/gnosis_vpn-worker"
-    echo "       sudo cp ./target/release/gnosis_vpn-worker ${worker_home}/"
-    echo "       sudo chown {{CLIENT_WORKER_USER}}:gnosisvpn ${worker_home}/gnosis_vpn-worker"
-    echo "  4. Run:"
-    echo "       sudo RUST_LOG=info \\"
-    echo "       ./target/release/gnosis_vpn-root \\"
-    echo "         --config-path ${bundle_dir}/client-on-network.toml \\"
-    echo "         --hopr-blokli-url \"${blokli_url}\" \\"
-    echo "         --hopr-identity-file ${bundle_dir}/extra_id.id \\"
-    echo "         --hopr-identity-pass \"\$(cat ${bundle_dir}/extra_id.password)\" \\"
-    echo "         --client-autostart 30min \\"
-    echo "         --worker-user {{CLIENT_WORKER_USER}} \\"
-    echo "         --state-home ${worker_home} \\"
-    echo "         --worker-binary ${worker_home}/gnosis_vpn-worker"
-    echo ""
-    echo "Make sure this host's firewall allows inbound from the other machine on:"
-    echo "  UDP 9000..$(({{CLUSTER_SIZE}} - 1 + 9000))   (HOPR P2P)"
-    echo "  TCP 8080                                     (Blokli)"
-    echo "  TCP 8000..$(({{SERVER_COUNT}} - 1 + 8000))   (VPN server API)"
-    echo "  UDP 51821..$(({{SERVER_COUNT}} - 1 + 51821)) (VPN server WireGuard)"
-    echo ""
-    echo "Component versions:"
-    just _component-version "gnosis_vpn-server" "{{GVPN_SERVER_DIR}}"
-    just _component-version "hoprd"             "{{HOPRD_DIR}}"
-    echo ""
-    echo "Metrics (on this host) — OTLP HTTP: 127.0.0.1:4318 | PromQL UI: http://localhost:8428"
-    echo "─────────────────────────────────────────────────────────────────"
+    @scripts/testenv/summary.sh on-network
 
-# Resolve the LAN-reachable IP: LAN_IP override, or auto-detect via default route
-_lan-ip:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Downstream recipes splice this into host:port strings and firewall rules, so it must be
-    # a plain IPv4 dotted-quad — a hostname or IPv6 address would silently produce invalid targets.
-    ipv4_pattern='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
-    if [ -n "{{LAN_IP}}" ]; then
-        if ! [[ "{{LAN_IP}}" =~ ${ipv4_pattern} ]]; then
-            echo "Error: LAN_IP='{{LAN_IP}}' is not an IPv4 dotted-quad (hostnames/IPv6 aren't supported)" >&2
-            exit 1
-        fi
-        echo "{{LAN_IP}}"
-        exit 0
-    fi
-    lan_ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p')
-    if [ -z "${lan_ip}" ]; then
-        echo "Error: could not auto-detect a LAN IP (no default route?) — set LAN_IP explicitly" >&2
-        exit 1
-    fi
-    echo "${lan_ip}"
-
-# Print <name>'s checked-out branch and commit, plus tag if HEAD is exactly tagged
-_component-version name dir:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    if [ ! -d "{{dir}}/.git" ]; then
-        echo "  {{name}}: {{dir}} (not a git checkout)"
-        exit 0
-    fi
-    commit=$(git -C "{{dir}}" rev-parse --short HEAD 2>/dev/null) || { echo "  {{name}}: unable to resolve commit"; exit 0; }
-    branch=$(git -C "{{dir}}" symbolic-ref --short -q HEAD || echo "detached")
-    tag=$(git -C "{{dir}}" describe --tags --exact-match 2>/dev/null || true)
-    dirty=""
-    [ -n "$(git -C "{{dir}}" status --porcelain 2>/dev/null)" ] && dirty=" (dirty)"
-    if [ -n "${tag}" ]; then
-        echo "  {{name}}: ${tag} (${branch}, ${commit})${dirty}"
-    else
-        echo "  {{name}}: ${branch} (${commit})${dirty}"
-    fi
 
 # Tear the full stack down and purge client state (cluster always restarts with new identities)
 down: client-stop server-stop cluster-stop curvy-stack-down metrics-stop
-    scripts/testenv/client.sh purge-state
+    @scripts/testenv/client.sh purge-state
 
 # Remove all generated configs, data, logs, chain container, and nix build results
 clean:
@@ -647,9 +486,7 @@ development-setup: up
 
 # Tail all cluster node logs and the client container's logs
 logs:
-    #!/usr/bin/env bash
-    tail -f "{{DATA_DIR}}/logs/"*.log &
-    docker logs -f gnosis_vpn-client
+    @scripts/testenv/logs.sh
 
 # Tail only cluster node logs
 node-logs:
