@@ -1,3 +1,7 @@
+# Every `:=` variable below reaches scripts/testenv/* as an environment variable; recipe
+# parameters travel as argv instead, since `set export` would join a `*ARGS` variadic into one word.
+set export := true
+
 # Paths to sibling repos — override via env in CI
 HOPRD_DIR       := env_var_or_default("HOPRD_DIR",       "../hoprd")
 GVPN_SERVER_DIR := env_var_or_default("GVPN_SERVER_DIR", "../gnosis_vpn-server")
@@ -12,7 +16,8 @@ CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/
 # transfers) or `curvy` (anonymous, through the Curvy deployment `curvy-stack-up` runs next to the
 # cluster). It picks the hoprd binary and the client image together, because the curve each pool
 # settles to is network-wide and never negotiated — see the note on build-cluster. Set by `up-curvy`.
-CLUSTER_PIX_POOL := env_var_or_default("CLUSTER_PIX_POOL", "test")
+# Empty rather than "test" so pix/run.sh still reaches its detect-the-pool-from-the-client-image path.
+CLUSTER_PIX_POOL := env_var_or_default("CLUSTER_PIX_POOL", "")
 HOPRD_PACKAGE    := if CLUSTER_PIX_POOL == "curvy" { "binary-hoprd-pix-curvy-x86_64-linux" } else { "binary-hoprd-pix-test-x86_64-linux" }
 HOPRD_RESULT     := if CLUSTER_PIX_POOL == "curvy" { "result-hoprd-pix-curvy" } else { "result-hoprd" }
 CLIENT_IMAGE     := if CLUSTER_PIX_POOL == "curvy" { "gnosis_vpn-client:pix-curvy" } else { "gnosis_vpn-client" }
@@ -124,14 +129,7 @@ build: build-cluster build-server build-client
 
 # Create the fixed-subnet Docker network joining the client container to the host-native localcluster
 network-create:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if docker network inspect "{{DOCKER_NETWORK}}" > /dev/null 2>&1; then
-        echo "Docker network {{DOCKER_NETWORK}} already exists — skipping create"
-    else
-        docker network create --subnet "{{DOCKER_NETWORK_SUBNET}}" --gateway "{{DOCKER_NETWORK_GATEWAY}}" "{{DOCKER_NETWORK}}"
-        echo "Created Docker network {{DOCKER_NETWORK}} (subnet {{DOCKER_NETWORK_SUBNET}}, gateway {{DOCKER_NETWORK_GATEWAY}})"
-    fi
+    scripts/testenv/network.sh create
 
 # Remove the Docker network
 network-remove:
@@ -172,111 +170,29 @@ curvy-stack-down:
 
 # ─── Localcluster ────────────────────────────────────────────────────────────
 
-# Shared start/restart logic for the three cluster-start* variants below: binary checks, skip-if-already-running-on-this-host, restart-if-running-on-a-different-host, spawn.
-_cluster-start p2p_host:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    lc_bin="{{LOCALCLUSTER_BIN}}"
-    hoprd_bin="{{HOPRD_BIN}}"
-    if [ ! -f "${lc_bin}" ]; then
-        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    if [ ! -f "${hoprd_bin}" ]; then
-        echo "Error: hoprd not found at ${hoprd_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    p2p_host="{{p2p_host}}"
-    cluster_state=$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // "not_running"')
-    if [ "${cluster_state}" = "failed" ]; then
-        echo "Cluster is in state 'failed' — run 'just cluster-stop' to clean up before restarting"
-        exit 1
-    fi
-    if [ -n "{{CLUSTER_ENABLE_PIX}}" ]; then want_pix=yes; pix_flag="--enable-pix"; else want_pix=no; pix_flag=""; fi
-    if [ "${cluster_state}" != "not_running" ]; then
-        current_host=$(just _cluster-p2p-host)
-        # PIX is written into the node configs at generation time, so a running cluster cannot be
-        # switched into or out of it — checked alongside the host for the same reason.
-        has_pix=$(just _cluster-has-pix)
-        if [ "${current_host}" = "${p2p_host}" ] && [ "${has_pix}" = "${want_pix}" ]; then
-            pid=$(pgrep -f hoprd-localcluster | head -1)
-            echo "Cluster found in state '${cluster_state}' (PID ${pid}), already on P2P host ${p2p_host} with PIX ${has_pix} — skipping start"
-            exit 0
-        fi
-        echo "Cluster is running with P2P host '${current_host}' and PIX ${has_pix}, but this recipe needs '${p2p_host}' with PIX ${want_pix} — restarting"
-        just cluster-stop
-    fi
-    if [ "{{CLUSTER_PIX_POOL}}" = "curvy" ]; then
-        # HOPRD_CHAIN_URL points the cluster at the Curvy chain instead of starting its own (so
-        # --chain-image below goes unused), HOPRD_CURVY_SCOPE_AGGREGATOR has it grant every Safe —
-        # the client's included — the aggregator target a direct shield needs, and the rest reaches
-        # the nodes' Curvy pools as their HOPRD_CURVY_* overrides.
-        [ -f "{{CURVY_STACK_ENV}}" ] || { echo "Error: no Curvy stack — run 'just curvy-stack-up' first" >&2; exit 1; }
-        . "{{CURVY_STACK_ENV}}"
-    fi
-    RUST_LOG={{CLUSTER_LOG_LEVEL}} \
-        "${lc_bin}" \
-        --hoprd-bin   "${hoprd_bin}" \
-        --chain-image "{{CHAIN_IMAGE}}" \
-        --size        {{CLUSTER_SIZE}} \
-        --p2p-host    "${p2p_host}" \
-        --data-dir    "{{DATA_DIR}}" \
-        --extra-identities 1 \
-        ${pix_flag} &
-    echo "Localcluster PID: $! (P2P on ${p2p_host}, PIX ${want_pix})"
-
 # Start localcluster (--extra-identities 1 pre-funds the client identity; P2P binds to the Docker gateway IP)
 cluster-start: network-create
-    just _cluster-start {{DOCKER_NETWORK_GATEWAY}}
+    scripts/testenv/cluster.sh start {{DOCKER_NETWORK_GATEWAY}}
 
 # Start localcluster for a host-native client (see up-client-on-host); P2P binds to loopback instead of the Docker gateway
 cluster-start-on-host:
-    just _cluster-start 127.0.0.1
+    scripts/testenv/cluster.sh start 127.0.0.1
 
 # Start localcluster reachable from other machines on the LAN (see up-on-network); P2P binds/announces LAN_IP
 cluster-start-on-network:
-    just _cluster-start "$(just _lan-ip)"
+    scripts/testenv/cluster.sh start-on-network
 
 # Poll until cluster reaches state=running
 cluster-wait:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    lc_bin="{{LOCALCLUSTER_BIN}}"
-    if [ ! -f "${lc_bin}" ]; then
-        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    echo "Waiting for cluster..."
-    until [ "$("${lc_bin}" status --data-dir "{{DATA_DIR}}" 2>/dev/null | jq -r '.state // empty')" = "running" ]; do
-        sleep 1
-    done
-    echo "Cluster running"
+    scripts/testenv/cluster.sh wait
 
 # Print live cluster status as JSON
 cluster-status:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    lc_bin="{{LOCALCLUSTER_BIN}}"
-    if [ ! -f "${lc_bin}" ]; then
-        echo "Error: hoprd-localcluster not found at ${lc_bin}" >&2
-        echo "Run 'just build-cluster' to build it first" >&2
-        exit 1
-    fi
-    "${lc_bin}" status --data-dir "{{DATA_DIR}}"
+    scripts/testenv/cluster.sh status
 
 # Stop localcluster
 cluster-stop:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    pkill -f hoprd-localcluster 2>/dev/null || true
-    pkill -f "result-hoprd[^/]*/bin/hoprd" 2>/dev/null || true
-    docker rm -f hopr-chain 2>/dev/null || true
-    # cluster recreates state everytime, so we can safely delete it on stop
-    rm -rf "{{DATA_DIR}}"
-    echo "Cluster stopped"
+    scripts/testenv/cluster.sh stop
 
 # ─── VPN Servers ─────────────────────────────────────────────────────────────
 
@@ -767,7 +683,7 @@ up-pix:
 # `up-pix` against the Curvy pool: the Curvy stack comes up first, and the cluster runs on its chain.
 # Bring the full stack up with PIX settling through Curvy (see pix/run.sh)
 up-curvy:
-    CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just build metrics-start curvy-stack-up cluster-start cluster-wait server-start gen-config client-start
+    env -u HOPRD_BIN CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just build metrics-start curvy-stack-up cluster-start cluster-wait server-start gen-config client-start
     @CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just summary
 
 # See the caveat on client-start-on-host before using this instead of `up`
@@ -892,24 +808,6 @@ _lan-ip:
         exit 1
     fi
     echo "${lan_ip}"
-
-# The P2P host the currently running cluster (if any) was started with, or empty if not running.
-# hoprd-localcluster's status JSON reports each node's dial address (host:port) from the moment
-# it's created — deterministic from --p2p-host, so this reflects the real flag even before any
-# node is ready.
-_cluster-p2p-host:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    "{{LOCALCLUSTER_BIN}}" status --data-dir "{{DATA_DIR}}" 2>/dev/null \
-        | jq -r '.nodes[0].p2p // empty' | sed -n 's/:[0-9]*$//p'
-
-# "yes"/"no" — whether the cluster's generated node configs carry a PIX strategy. Read off the
-# config on disk rather than the status JSON, which does not report it; `--enable-pix` is baked in
-# at generation time, so a running cluster cannot be switched either way.
-_cluster-has-pix:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    if grep -qE '^\s+- Pix:' "{{DATA_DIR}}/hoprd_cfg_0.yaml" 2>/dev/null; then echo yes; else echo no; fi
 
 # Print <name>'s checked-out branch and commit, plus tag if HEAD is exactly tagged
 _component-version name dir:
