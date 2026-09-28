@@ -59,6 +59,7 @@
                 nodejs
                 gettext
                 jq
+                just
                 bats
                 opentelemetry-collector
                 victoriametrics
