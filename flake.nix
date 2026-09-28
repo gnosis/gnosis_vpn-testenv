@@ -41,6 +41,8 @@
 
             programs.shfmt.enable = true;
             programs.shfmt.indent_size = 4; # every script here is 4-space; the module default is 2
+            # `-s` rewrites "\$X" and "\\" into single quotes, which shellcheck then flags
+            programs.shfmt.simplify = false;
           };
 
           # Host-mode e2e (`just e2e --client-mode host`) drives obscura on this machine

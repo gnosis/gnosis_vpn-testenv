@@ -198,255 +198,52 @@ cluster-stop:
 
 # Start SERVER_COUNT gnosis_vpn-server containers (server-i: WireGuard 51821+i/udp, API 8000+i)
 server-start:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for i in $(seq 0 $(({{SERVER_COUNT}} - 1))); do
-        name="gnosis_vpn-server-${i}"
-        wg_port=$((51821 + i))
-        api_port=$((8000 + i))
-        if docker container inspect "${name}" > /dev/null 2>&1; then
-            echo "${name} already exists — skipping start"
-            echo "  WireGuard: ${wg_port}/udp, API: ${api_port}"
-            continue
-        fi
-        private_key=$(wg genkey)
-        docker run --rm --detach \
-            --env  "PRIVATE_KEY=${private_key}" \
-            --env  "RUST_LOG={{SERVER_LOG_LEVEL}}" \
-            --publish "${api_port}:8000" \
-            --publish "${wg_port}:51820/udp" \
-            --cap-add=NET_ADMIN \
-            --add-host=host.docker.internal:host-gateway \
-            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-            --sysctl net.ipv4.ip_forward=1 \
-            --name "${name}" \
-            gnosis_vpn-server
-        sleep 1
-        running=$(docker inspect "${name}" 2>/dev/null | jq -r '.[0].State.Running // "false"')
-        if [ "${running}" != "true" ]; then
-            echo "Error: ${name} failed to start" >&2
-            { docker logs "${name}" 2>&1 || true; } >&2
-            exit 1
-        fi
-        echo "Started ${name} — WireGuard: ${wg_port}/udp, API: ${api_port}"
-    done
+    scripts/testenv/server.sh start
 
 # Stop all VPN server containers
 server-stop:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for i in $(seq 0 $(({{SERVER_COUNT}} - 1))); do
-        docker stop "gnosis_vpn-server-${i}" 2>/dev/null \
-            && echo "Stopped gnosis_vpn-server-${i}" \
-            || echo "gnosis_vpn-server-${i} was not running"
-    done
+    scripts/testenv/server.sh stop
 
 # ─── Config generation ───────────────────────────────────────────────────────
 
 # Derive client config and system-test artifacts from live cluster status
 gen-config:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p "{{CONFIG_DIR}}"
-    lc_bin="{{LOCALCLUSTER_BIN}}"
-
-    status=$("${lc_bin}" status --data-dir "{{DATA_DIR}}")
-    blokli_url=$(echo "${status}" | jq -r '.blokli_url')
-
-    # One [destinations.node-N] block per cluster exit node
-    destinations=""
-    while IFS= read -r node; do
-        id=$(echo "${node}"      | jq -r '.id')
-        address=$(echo "${node}" | jq -r '.address')
-        block=$(DEST_ID="${id}" DEST_ADDRESS="${address}" DEST_HOPS="{{HOPS}}" \
-            envsubst '$DEST_ID,$DEST_ADDRESS,$DEST_HOPS' \
-            < "{{TEMPLATES_DIR}}/destination.toml.tpl")
-        destinations+="${block}"$'\n'
-    done < <(echo "${status}" | jq -c '.nodes[]')
-
-    # The PIX block has to agree with how the cluster was started, so it comes off the same switch.
-    if [ -n "{{CLUSTER_ENABLE_PIX}}" ]; then
-        pix_section=$(cat "{{TEMPLATES_DIR}}/pix-on.toml.tpl")
-    else
-        pix_section=$(cat "{{TEMPLATES_DIR}}/pix-off.toml.tpl")
-    fi
-
-    DESTINATIONS="${destinations}" PIX_SECTION="${pix_section}" \
-        envsubst '$DESTINATIONS,$PIX_SECTION' \
-        < "{{TEMPLATES_DIR}}/client.toml.tpl" \
-        > "{{CONFIG_DIR}}/client.toml"
-
-    echo "${blokli_url}" > "{{CONFIG_DIR}}/blokli_url"
-    echo "Generated {{CONFIG_DIR}}/client.toml"
-
-    # Persist the extra identity artifacts needed by client and system tests
-    extra=$(echo "${status}" | jq -c '.extras[0] // empty')
-    if [ -n "${extra}" ]; then
-        keystore_path=$(echo "${extra}" | jq -r '.keystore_path')
-        cp "${keystore_path}"                       "{{CONFIG_DIR}}/extra_id.id"
-        echo "${extra}" | jq -r '.password'       > "{{CONFIG_DIR}}/extra_id.password"
-        echo "${extra}" | jq -r '.safe_address'   > "{{CONFIG_DIR}}/extra_id.safe"
-        echo "${extra}" | jq -r '.module_address' > "{{CONFIG_DIR}}/extra_id.module"
-        echo "Saved extra identity artifacts to {{CONFIG_DIR}}"
-    fi
+    scripts/testenv/config.sh gen
 
 # Derive a LAN-reachable client config + blokli URL for a client running on another machine (see up-on-network)
 gen-config-on-network: gen-config
-    #!/usr/bin/env bash
-    set -euo pipefail
-    lan_ip=$(just _lan-ip)
-    sed "s/127\.0\.0\.1/${lan_ip}/g" "{{CONFIG_DIR}}/client.toml" > "{{CONFIG_DIR}}/client-on-network.toml"
-    sed "s/localhost/${lan_ip}/"     "{{CONFIG_DIR}}/blokli_url"   > "{{CONFIG_DIR}}/blokli_url-on-network"
-    mkdir -p "{{NETWORK_BUNDLE_DIR}}"
-    cp "{{CONFIG_DIR}}/client-on-network.toml" "{{CONFIG_DIR}}/extra_id.id" "{{CONFIG_DIR}}/extra_id.password" "{{NETWORK_BUNDLE_DIR}}/"
-    echo "Generated {{CONFIG_DIR}}/client-on-network.toml (exit server via ${lan_ip})"
-    echo "Bundled remote-client files into {{NETWORK_BUNDLE_DIR}}"
+    scripts/testenv/config.sh gen-on-network
 
 # ─── Client ──────────────────────────────────────────────────────────────────
 
 # Start the gnosis_vpn-client container (CAP_NET_ADMIN, no sudo needed — see README)
 client-start: network-create
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if docker container inspect gnosis_vpn-client > /dev/null 2>&1; then
-        echo "gnosis_vpn-client already exists — skipping start"
-        exit 0
-    fi
-    mkdir -p "{{CLIENT_STATE_DIR}}"
-    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url" | sed 's/localhost/host.docker.internal/')
-    extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
-    # The client's embedded node is the PIX Entry, so under the Curvy pool it needs what the nodes
-    # get: the pool's HOPRD_CURVY_* overrides, and the proving keys it allocates deposits with.
-    curvy_args=()
-    if [ "{{CLUSTER_PIX_POOL}}" = "curvy" ]; then
-        [ -f "{{CURVY_STACK_ENV}}" ] || { echo "Error: no Curvy stack — run 'just curvy-stack-up' first" >&2; exit 1; }
-        . "{{CURVY_STACK_ENV}}"
-        curvy_args=(
-            --env HOPRD_CURVY_SHIELDING --env HOPRD_CURVY_SUBMISSION --env HOPRD_CURVY_RELAYER_URL
-            --env HOPRD_CURVY_NOTE_SOURCE --env HOPRD_CURVY_TOKEN
-            --env CURVY_ZK_KEYS_DIR=/curvy-zk --volume "${CURVY_ZK_KEYS_DIR}:/curvy-zk:ro"
-        )
-    fi
-    docker run --detach --rm \
-        --name gnosis_vpn-client \
-        --network "{{DOCKER_NETWORK}}" \
-        --cap-add=NET_ADMIN \
-        --device /dev/net/tun \
-        --add-host=host.docker.internal:host-gateway \
-        --env RUST_LOG="{{CLIENT_LOG_LEVEL}}" \
-        --env GNOSISVPN_CONFIG_PATH=/config/client.toml \
-        --env GNOSISVPN_HOPR_BLOKLI_URL="${blokli_url}" \
-        --env GNOSISVPN_HOPR_IDENTITY_FILE=/config/extra_id.id \
-        --env GNOSISVPN_HOPR_IDENTITY_PASS="${extra_id_pass}" \
-        --env GNOSISVPN_HOME=/var/lib/gnosisvpn \
-        --env GNOSISVPN_CLIENT_AUTOSTART=30min \
-        --volume "{{CONFIG_DIR}}:/config:ro" \
-        --volume "{{CLIENT_STATE_DIR}}:/var/lib/gnosisvpn" \
-        "${curvy_args[@]}" \
-        "{{CLIENT_IMAGE}}"
-    sleep 1
-    running=$(docker inspect gnosis_vpn-client 2>/dev/null | jq -r '.[0].State.Running // "false"')
-    if [ "${running}" != "true" ]; then
-        echo "Error: gnosis_vpn-client failed to start" >&2
-        { docker logs gnosis_vpn-client 2>&1 || true; } >&2
-        exit 1
-    fi
-    echo "Started gnosis_vpn-client"
+    scripts/testenv/client.sh start
 
 # Stop the client, wherever it's running (container or host-native — used by down)
 client-stop:
-    #!/usr/bin/env bash
-    docker stop gnosis_vpn-client 2>/dev/null || true
-    # only touch sudo if a host-native client is actually running, so the container-only
-    # workflow (the common case) never hits a sudo prompt here
-    if pgrep -f gnosis_vpn-root > /dev/null 2>&1 || pgrep -f gnosis_vpn-worker > /dev/null 2>&1; then
-        sudo pkill -f gnosis_vpn-root   2>/dev/null || true
-        sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
-    fi
+    scripts/testenv/client.sh stop
 
 # Reintroduces the routing-loop risk the container was built to avoid (see README "Why the
 # client runs in its own container") if gnosis_vpn-server shares the host's egress — don't run
 # this alongside `client-start`, they'd collide over CLIENT_STATE_DIR and the default control socket.
 # Start gnosis_vpn-client as a native host process instead of in Docker (dev/debug convenience)
 client-start-on-host:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    root_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-root"
-    worker_bin="{{GVPN_CLIENT_DIR}}/result/bin/gnosis_vpn-worker"
-    if [ ! -f "${root_bin}" ] || [ ! -f "${worker_bin}" ]; then
-        echo "Error: gnosis_vpn-client binaries not found at {{GVPN_CLIENT_DIR}}/result/bin/" >&2
-        echo "Run 'just build-client-native' to build them first" >&2
-        exit 1
-    fi
-    if ! id "{{CLIENT_WORKER_USER}}" > /dev/null 2>&1; then
-        echo "Error: worker user '{{CLIENT_WORKER_USER}}' not found on this host." >&2
-        echo "gnosis_vpn-root drops privileges to this user (by uid/gid) when spawning gnosis_vpn-worker," >&2
-        echo "so it must already exist as a system account (its home directory is irrelevant — create" >&2
-        echo "one via your NixOS config, or override the name via CLIENT_WORKER_USER)." >&2
-        exit 1
-    fi
-    if pgrep -f gnosis_vpn-root > /dev/null 2>&1; then
-        echo "Client already running on host — skipping start"
-        exit 0
-    fi
-    mkdir -p "{{CLIENT_STATE_DIR}}"
-    blokli_url=$(cat "{{CONFIG_DIR}}/blokli_url")
-    extra_id_pass=$(cat "{{CONFIG_DIR}}/extra_id.password")
-    # sudo backgrounded can't read TTY; pre-authenticate while still interactive
-    sudo -v
-    sudo RUST_LOG="{{CLIENT_LOG_LEVEL}}" \
-        GNOSISVPN_CONFIG_PATH="{{CONFIG_DIR}}/client.toml" \
-        GNOSISVPN_HOPR_BLOKLI_URL="${blokli_url}" \
-        GNOSISVPN_HOPR_IDENTITY_FILE="{{CONFIG_DIR}}/extra_id.id" \
-        GNOSISVPN_HOPR_IDENTITY_PASS="${extra_id_pass}" \
-        GNOSISVPN_HOME="{{CLIENT_STATE_DIR}}" \
-        GNOSISVPN_CLIENT_AUTOSTART=30min \
-        GNOSISVPN_WORKER_USER="{{CLIENT_WORKER_USER}}" \
-        GNOSISVPN_LOG_FILE="{{CLIENT_LOG_FILE}}" \
-        "${root_bin}" --worker-binary "${worker_bin}" &
-    echo "Client PID: $!"
+    scripts/testenv/client.sh start-on-host
 
 # Stop the host-native client (cascades SIGTERM to the worker via gnosis_vpn-root)
 client-stop-on-host:
-    #!/usr/bin/env bash
-    sudo pkill -f gnosis_vpn-root   2>/dev/null || true
+    sudo pkill -f gnosis_vpn-root 2>/dev/null || true
     sudo pkill -f gnosis_vpn-worker 2>/dev/null || true
-    echo "Client (host) stopped"
+    @echo "Client (host) stopped"
 
 # Tail the host-native client's log file
 client-logs-on-host:
     tail -f "{{CLIENT_LOG_FILE}}"
 
-# Purge worker state without prompting (used by down).
-# Escalates only when it has to. The *container's* entrypoint chowns this bind-mounted dir to its
-# internal worker uid, so the host user cannot remove it afterwards — but when the client ran on the
-# host, or never ran at all, the directory is plainly removable or absent. Asking for a password
-# there failed the whole `down` on a shell without a tty, after everything else had already stopped.
-_purge-state:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -e "{{CLIENT_STATE_DIR}}" ]; then
-        echo "{{CLIENT_STATE_DIR}} does not exist — nothing to purge"
-        exit 0
-    fi
-    if rm -rf "{{CLIENT_STATE_DIR}}" 2>/dev/null; then
-        echo "Purged {{CLIENT_STATE_DIR}}"
-        exit 0
-    fi
-    sudo rm -rf "{{CLIENT_STATE_DIR}}"
-    echo "Purged {{CLIENT_STATE_DIR}} (needed sudo)"
-
 # Remove all persistent worker state (identity keys, cache) from CLIENT_STATE_DIR
 purge-state:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    read -r -p "Permanently delete '{{CLIENT_STATE_DIR}}'? Type 'yes' to confirm: " answer
-    if [ "${answer}" != "yes" ]; then
-        echo "Aborted"
-        exit 1
-    fi
-    sudo rm -rf "{{CLIENT_STATE_DIR}}"
-    echo "Purged {{CLIENT_STATE_DIR}}"
+    scripts/testenv/client.sh purge-state-interactive
 
 # ─── System tests ────────────────────────────────────────────────────────────
 
@@ -829,7 +626,8 @@ _component-version name dir:
     fi
 
 # Tear the full stack down and purge client state (cluster always restarts with new identities)
-down: client-stop server-stop cluster-stop curvy-stack-down metrics-stop _purge-state
+down: client-stop server-stop cluster-stop curvy-stack-down metrics-stop
+    scripts/testenv/client.sh purge-state
 
 # Remove all generated configs, data, logs, chain container, and nix build results
 clean:
