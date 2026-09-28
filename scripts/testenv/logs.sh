@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # No `set`: this is an interactive tail, killed with Ctrl-C.
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 
 : "${DATA_DIR:?}"

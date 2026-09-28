@@ -3,7 +3,7 @@
 # runs, this machine's traffic egresses through the exit under test.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 
 : "${CONFIG_DIR:?}"

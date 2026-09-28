@@ -2,7 +2,7 @@
 # No `-e`: `down` must finish tearing the stack down even when a step reports failure.
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 
 : "${HOPRD_DIR:?}"

@@ -2,7 +2,7 @@
 # No `-e`: a missing or broken component checkout must not abort the whole report.
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/common.sh"
 
 : "${GVPN_CLIENT_DIR:?}"
@@ -122,9 +122,12 @@ on_network() {
     echo "─────────────────────────────────────────────────────────────────"
 }
 
-case "${1:-}" in
-default) default ;;
-host-client) host_client ;;
-on-network) on_network ;;
-*) die "usage: summary.sh default|host-client|on-network" ;;
-esac
+# Scoped to direct execution so bats can source this file for component_version alone.
+if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
+    case "${1:-}" in
+    default) default ;;
+    host-client) host_client ;;
+    on-network) on_network ;;
+    *) die "usage: summary.sh default|host-client|on-network" ;;
+    esac
+fi
