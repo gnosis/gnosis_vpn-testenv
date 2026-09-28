@@ -302,6 +302,8 @@ up: build metrics-start cluster-start cluster-wait server-start gen-config clien
 up-pix:
     CLUSTER_ENABLE_PIX=1 just up
 
+# `env -u`: `set export` would hand the nested just this recipe's own HOPRD_BIN, keeping the
+# pix-test binary instead of recomputing the curvy one from CLUSTER_PIX_POOL.
 # `up-pix` against the Curvy pool: the Curvy stack comes up first, and the cluster runs on its chain.
 # Bring the full stack up with PIX settling through Curvy (see pix/run.sh)
 up-curvy:
@@ -328,7 +330,6 @@ summary-host-client:
 # Print what to copy/run on the other machine, the required firewall ports, and component versions
 summary-on-network:
     @scripts/testenv/summary.sh on-network
-
 
 # Tear the full stack down and purge client state (cluster always restarts with new identities)
 down: client-stop server-stop cluster-stop curvy-stack-down metrics-stop
