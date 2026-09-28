@@ -33,6 +33,14 @@
               "*.yml"
               "*.yaml"
             ];
+
+            programs.shellcheck.enable = true;
+            # scripts source siblings through $SCRIPT_DIR/$HERE, unresolvable without these two
+            programs.shellcheck.external-sources = true;
+            programs.shellcheck.source-path = "SCRIPTDIR";
+
+            programs.shfmt.enable = true;
+            programs.shfmt.indent_size = 4; # every script here is 4-space; the module default is 2
           };
 
           # Host-mode e2e (`just e2e --client-mode host`) drives obscura on this machine
