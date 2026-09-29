@@ -33,6 +33,12 @@ EOF
     [[ "$output" == *"is not an IPv4 dotted-quad"* ]]
 }
 
+@test "an out-of-range octet in LAN_IP is rejected" {
+    run bash -c "source '${COMMON}'; LAN_IP=999.999.999.999 lan_ip"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is not an IPv4 dotted-quad"* ]]
+}
+
 @test "without LAN_IP the default route's src address is used" {
     run lan_ip_with_fake_ip_route "1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.42 uid 1000"
     [ "$status" -eq 0 ]

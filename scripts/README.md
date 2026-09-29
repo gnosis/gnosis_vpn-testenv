@@ -74,4 +74,5 @@ scripts, fake sysfs interfaces (`scripts/tests/helpers.bash`) for
 suites, which cover the derivable parts of `testenv/` (LAN IP resolution, status
 and node-config parsing, config rendering, component versions) and leave
 container orchestration alone. Run with `bats scripts/tests/` (or
-`just test-scripts`); CI runs the same suite on every PR.
+`just test-scripts`); CI runs the same suite on every PR from a branch in this
+repo (fork PRs skip it).

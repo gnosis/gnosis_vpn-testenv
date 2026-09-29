@@ -18,14 +18,22 @@ cluster_status_json() {
     "${LOCALCLUSTER_BIN}" status --data-dir "${DATA_DIR}" 2>/dev/null
 }
 
+# A LAN IP is spliced into host:port strings and firewall rules, so a bad one must fail here.
+is_ipv4() {
+    local octets octet
+    IFS=. read -r -a octets <<<"$1"
+    [ "${#octets[@]}" -eq 4 ] || return 1
+    for octet in "${octets[@]}"; do
+        [[ ${octet} =~ ^[0-9]{1,3}$ ]] || return 1
+        [ "${octet}" -le 255 ] || return 1
+    done
+}
+
 # Resolve the LAN-reachable IP: LAN_IP override, or auto-detect via default route.
 lan_ip() {
-    # Callers splice this into host:port strings and firewall rules, so it must be a plain IPv4
-    # dotted-quad — a hostname or IPv6 address would silently produce invalid targets.
-    local ipv4_pattern='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
     if [ -n "${LAN_IP:-}" ]; then
-        [[ ${LAN_IP} =~ ${ipv4_pattern} ]] ||
-            die "Error: LAN_IP='${LAN_IP}' is not an IPv4 dotted-quad (hostnames/IPv6 aren't supported)"
+        is_ipv4 "${LAN_IP}" ||
+            die "Error: LAN_IP='${LAN_IP}' is not an IPv4 dotted-quad (hostnames, IPv6 and out-of-range octets aren't supported)"
         echo "${LAN_IP}"
         return 0
     fi
