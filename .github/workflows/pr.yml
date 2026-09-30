@@ -42,11 +42,12 @@ jobs:
   ci-ok:
     name: CI OK
     # Single required status check: stable across matrix expansion, label gating and fork guards.
-    if: always() # a skipped job counts as passing, so never let a failed dependency skip this one
+    if: always() # must still report when a dependency failed or skipped
     needs: [checks, scripts-tests]
     runs-on: depot-ubuntu-22.04-4
     permissions: {}
     steps:
-      - name: Fail if any CI job failed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      - name: Fail unless every CI job succeeded
+        # a skipped job means nothing ran (a fork PR gets no secrets): that is not a pass
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: exit 1
