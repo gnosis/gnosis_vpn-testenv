@@ -23,7 +23,8 @@
 # the money moves differently: the client's Safe pays once, shielding a float into the Curvy vault
 # that every deposit is then allocated out of, and the vault pays the exit less its withdrawal fee.
 # So the exit's income is asserted net of that fee, and the client's Safe is reported, not asserted.
-# The pool is read off the client image `up-curvy` starts; CLUSTER_PIX_POOL overrides it.
+# The pool is read off the Curvy stack `up-curvy` leaves behind ($CONFIG_DIR/curvy-stack.env);
+# CLUSTER_PIX_POOL overrides it.
 #
 # Requires jq, curl, bc and docker. Budget ~5 minutes after the stack is up.
 
@@ -48,8 +49,9 @@ DESTINATION="${DESTINATION:-}"
 # What buys cycles is wall-clock time with traffic flowing, hence a duration rather than a count.
 PING_SECONDS="${PING_SECONDS:-180}"
 PING_INTERVAL="${PING_INTERVAL:-0.2}"
-# Reply + ICMP/IP headers + WireGuard overhead has to stay under the 1038 B HOPR payload, or one
-# reply costs two packets and the byte accounting below stops being a floor.
+# Reply + ICMP/IP headers + WireGuard overhead has to stay under the HOPR payload (PAYLOAD_SIZE
+# below), or one reply costs two packets and the byte accounting below stops being a floor. 900 B
+# fits both payload sizes hopr-lib has had.
 PING_SIZE="${PING_SIZE:-900}"
 
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
@@ -181,12 +183,12 @@ fi
 
 # Which deposit pool this stack settles through: `up-curvy` starts the client from its `pix-curvy`
 # image, and the node binary it pairs with is chosen by the same switch.
+# `curvy-stack-up` writes the stack's environment there and `curvy-stack-down` removes it, so its
+# presence is the cluster's pool. (The client image carries no pool in its tag any more: since
+# gnosis_vpn-client#839 it is one build, on edgli's default `pix-curvy`.)
 POOL="${CLUSTER_PIX_POOL:-}"
 if [ -z "$POOL" ]; then
-    case "$(docker inspect "$CLIENT_CONTAINER" 2>/dev/null | jq -r '.[0].Config.Image // empty')" in
-    *:pix-curvy) POOL="curvy" ;;
-    *) POOL="test" ;;
-    esac
+    if [ -f "${CONFIG_DIR}/curvy-stack.env" ]; then POOL="curvy"; else POOL="test"; fi
 fi
 case "$POOL" in
 test) SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-180}" ;;
@@ -219,8 +221,12 @@ SSA_PART_SIZE=$(pix_dim ssa_part_size)
 ADDITIONAL_SHARES=$(pix_dim additional_shares)
 PRICE_PER_BYTE=$(grep -A3 '^\[pix_strategy\]' "${CONFIG_DIR}/client.toml" | awk '$1 == "price_per_byte" { gsub(/"/, "", $3); print $3; exit }')
 
-# PACKET_PAYLOAD_SIZE — hopr-lib's HoprPacket::PAYLOAD_SIZE.
-PAYLOAD_SIZE=1038
+# hopr-lib's HoprPacket::PAYLOAD_SIZE, the bytes of session data one HOPR packet carries, which
+# is what every PIX dimension is counted in. 3246 since hopr-lib 5.0.0-rc.5 (hoprnet#8313 grew
+# the Sphinx packet from 1040 to 3248 bytes so a WireGuard datagram fits in one); 1038 on the
+# rc.4 line and before. Not negotiated and not exposed by the node, so it is stated here and has
+# to match the hopr-lib both ends were built from.
+PAYLOAD_SIZE="${PAYLOAD_SIZE:-3246}"
 QUOTA=$((NUM_SSA_PARTS * (SSA_PART_SIZE + ADDITIONAL_SHARES) * PAYLOAD_SIZE))
 PER_CYCLE=$(calc "$PRICE_PER_BYTE * $QUOTA")
 
@@ -230,10 +236,12 @@ echo "-- waiting for destinations"
 ready_destination() {
     local id
     # `route_health.state` is internally tagged, so the variant name is a `state` field rather than
-    # the object's only key.
+    # the object's only key. Clients up to 0.101 report `ReadyToConnect` once a health check has
+    # passed; from the path-planner rework on, `Routable` (a plannable path exists) is the state a
+    # connect proceeds from, and the probe results sit beside it.
     id=$(ctl_json status | jq -r '
         .Status.destinations[]
-        | select(.route_health.state.state == "ReadyToConnect")
+        | select(.route_health.state.state == "ReadyToConnect" or .route_health.state.state == "Routable")
         | .destination.id' | head -1)
     [ -n "$id" ] && {
         READY_ID="$id"

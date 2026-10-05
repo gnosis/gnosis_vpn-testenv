@@ -29,16 +29,17 @@ CLUSTER_WAIT_TIMEOUT := env_var_or_default("CLUSTER_WAIT_TIMEOUT", "900")
 DATA_DIR     := env_var_or_default("DATA_DIR",     "/tmp/hopr-nodes")
 CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest")
 
-# The PIX deposit pool both ends settle through when PIX is on: `test` (visible secp256k1
+# The PIX deposit pool the cluster's exits settle through when PIX is on: `test` (visible secp256k1
 # transfers) or `curvy` (anonymous, through the Curvy deployment `curvy-stack-up` runs next to the
-# cluster). It picks the hoprd binary and the client image together, because the curve each pool
-# settles to is network-wide and never negotiated — see the note on build-cluster. Set by `up-curvy`.
-# Empty rather than "test" so pix/run.sh still reaches its detect-the-pool-from-the-client-image path.
+# cluster). It picks the hoprd binary, because the curve each pool settles to is network-wide and
+# never negotiated — see the note on build-cluster. Set by `up-curvy`. The client has no switch:
+# since gnosis_vpn-client#839 it is built against edgli's default pool, `pix-curvy`, in its one
+# image, so only `up-curvy` can pair it with a cluster. Empty rather than "test" so pix/run.sh still
+# reaches its detect-the-pool-from-the-stack path.
 CLUSTER_PIX_POOL := env_var_or_default("CLUSTER_PIX_POOL", "")
 HOPRD_PACKAGE    := if CLUSTER_PIX_POOL == "curvy" { "binary-hoprd-pix-curvy-x86_64-linux" } else { "binary-hoprd-pix-test-x86_64-linux" }
 HOPRD_RESULT     := if CLUSTER_PIX_POOL == "curvy" { "result-hoprd-pix-curvy" } else { "result-hoprd" }
-CLIENT_IMAGE     := env_var_or_default("CLIENT_IMAGE", if CLUSTER_PIX_POOL == "curvy" { "gnosis_vpn-client:pix-curvy" } else { "gnosis_vpn-client" })   # env override per cell (T26-version-matrix); the pix-curvy tag under the Curvy pool
-CLIENT_BUILD     := if CLUSTER_PIX_POOL == "curvy" { "docker-build-pix-curvy" } else { "docker-build" }
+CLIENT_IMAGE     := env_var_or_default("CLIENT_IMAGE", "gnosis_vpn-client")   # env override per cell (T26-version-matrix)
 
 # The Curvy stack is published on the Docker bridge's gateway, so the host-native nodes and the
 # client container reach it at the same address. Its gateway (relayer, indexer) moves off 3000,
@@ -153,8 +154,8 @@ default:
 # node was not built for" in the node log) and no destination ever connects. `hoprd-localcluster`
 # is already built against hoprd's `strategy-pix-test`, so only the node binary was mismatched.
 # Build hoprd and hoprd-localcluster binaries via nix
-# With CLUSTER_PIX_POOL=curvy the node is the `pix-curvy` variant instead, and the client is built
-# with edgli's `pix-curvy` to match.
+# With CLUSTER_PIX_POOL=curvy the node is the `pix-curvy` variant instead, which is what the client
+# (built against edgli's default pool, `pix-curvy`) pairs with.
 build-cluster:
     nix build -L --out-link {{HOPRD_DIR}}/{{HOPRD_RESULT}} {{HOPRD_DIR}}#{{HOPRD_PACKAGE}}
     nix build -L --out-link {{HOPRD_DIR}}/result-localcluster {{HOPRD_DIR}}#binary-hoprd-localcluster
@@ -163,9 +164,9 @@ build-cluster:
 build-server:
     cd {{GVPN_SERVER_DIR}} && just docker-build
 
-# Build gnosis_vpn-client Docker image (the `pix-curvy` variant under CLUSTER_PIX_POOL=curvy)
+# Build gnosis_vpn-client Docker image
 build-client:
-    cd {{GVPN_CLIENT_DIR}} && just {{CLIENT_BUILD}}
+    cd {{GVPN_CLIENT_DIR}} && just docker-build
 
 # Build gnosis_vpn-client binaries only (no Docker image) — for the host-native client
 build-client-native:
