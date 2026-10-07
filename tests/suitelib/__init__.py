@@ -7,4 +7,5 @@ cluster  the hoprd localcluster: status JSON, node REST and /metrics, live tc ne
 target   the in-cluster traffic target: sized HTTP transfers, per-second interface sampling, UDP probes
 stats    small numeric helpers
 tomlcfg  line-based TOML section editing for client-config cells
+planner  candidate paths per draw from the client's path-planner DEBUG lines (T33)
 """

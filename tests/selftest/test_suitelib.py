@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from suitelib import tomlcfg  # noqa: E402
+from suitelib import planner, tomlcfg  # noqa: E402
 from suitelib.client import count_log_errors, sidecar_mount_issues, telemetry_sum  # noqa: E402
 from suitelib.config import Config, q  # noqa: E402
 from suitelib.verdicts import Checks, RunDir, read_jsonl  # noqa: E402
@@ -320,3 +320,31 @@ def test_tomlcfg_set_keys_merges_into_an_existing_table(tmp_path):
     g.write_text("version = 6\n\n[connection]\nprobe_local_addresses = true\n")
     tomlcfg.set_keys(g, "[connection.path_planner]", max_cached_paths="1")
     assert tomllib.loads(g.read_text())["connection"] == {"probe_local_addresses": True, "path_planner": {"max_cached_paths": 1}}
+
+
+def _planner_line(path, prob, kind="fill"):
+    return (f"2026-09-24T14:10:00Z DEBUG hopr_transport::path::planner: weighted candidate path kind=\"{kind}\" "
+            f"destination=0xdd hops=1 path=0x{path} -> 0xdd cost=0.12 composite_weight=0.5 sampling_probability={prob}")
+
+
+def test_planner_one_rebuild_of_three_and_the_return_draw():
+    log = [_planner_line(p, "0.3333") for p in ("1a", "2a", "3a")]
+    log.append("x DEBUG hopr_transport::path::planner: drawing return paths from tempered weights count=4 candidates=3")
+    r = planner.candidates(log)
+    assert (r["lines"], r["rebuilds"], r["candidates"], r["forward"], r["return"], r["churn"]) == (3, 1, 3, 3, 3, 3)
+
+
+def test_planner_pinned_with_churn_is_one_candidate():
+    # one path at a time, a different one at each refresh: 1 candidate, churn 4 (distinct paths read it as broken)
+    r = planner.candidates([_planner_line(p, "1.0", "background-refresh") for p in ("1a", "2a", "3a", "4a")])
+    assert (r["candidates"], r["rebuilds"], r["churn"]) == (1, 4, 4)
+
+
+def test_planner_ignores_ansi_and_the_cost_field():
+    log = [_planner_line("1a", "0.5").replace("path=", "\x1b[3mpath\x1b[0m="), _planner_line("2a", "0.5")]
+    r = planner.candidates(log)
+    assert (r["candidates"], r["churn"]) == (2, 2)
+
+
+def test_planner_nothing_logged_is_zero_lines():
+    assert planner.candidates(["INFO something else"])["lines"] == 0
