@@ -6,10 +6,10 @@ order reversed on even passes (ABBA). Per arm: the keys merged into client.toml,
 hopr_transport::path::planner=debug, one session of REPS (--fast 2) transfers of BYTES both ways, and the number of
 candidate paths the planner drew from in that session's log (suitelib/planner.py).
 
-Pin check first: every pinned session must read candidates = 1, or the comparison is void (WARN, `PIN DID NOT TAKE`);
-a pinned session with no planner lines is NOT VERIFIED (WARN), never a pass. An `auto` that reads <= 1 candidate has no
-diversity to lose (WARN). Otherwise PASS, recording per arm the median and slowest session download, completions, and
-per pair the arm/auto download ratio with a sign count. Nothing is scored against a threshold: the localcluster has
+Pin check first: every pinned session must read candidates = 1, or the comparison is void (WARN, `PIN DID NOT TAKE`); a
+pinned or `auto` session with no planner lines is NOT VERIFIED (WARN), never a pass. An `auto` that reads <= 1 candidate
+has no diversity to lose (WARN). Otherwise PASS, recording per arm the median and slowest session download, completions,
+and per pair the arm/auto download ratio with a sign count. Nothing is scored against a threshold: the localcluster has
 two relays at equal latency, so this checks the mechanism and the pipeline, not the field effect, which needs a real
 network (the VM bench in hoprnet#8408).
 
@@ -47,12 +47,20 @@ def is_pinned(arm):
     return ARMS[arm].get("max_cached_paths") == "1"
 
 
+def parse_arms(words):
+    """The ARMS knob as a list: `auto` (the baseline) plus at least one other known arm, each once. ARMS="auto" alone
+    compared nothing and passed; a repeated arm shifted the pairing against auto."""
+    unknown = sorted({a for a in words if a not in ARMS})
+    dupes = sorted({a for a in words if words.count(a) > 1})
+    if unknown or dupes or "auto" not in words or len(words) < 2:
+        raise ValueError(f"knob ARMS: {' '.join(words)!r}; needs `auto` and at least one other arm, each once "
+                         f"(known {sorted(ARMS)}; unknown {unknown}, repeated {dupes})")
+    return words
+
+
 def test_path_pin_ab(cfg, run, client, target, checks, knobs):
     k = knobs
-    arms = k.words("ARMS", required=True)
-    unknown = [a for a in arms if a not in ARMS]
-    if unknown or "auto" not in arms:
-        raise ValueError(f"knob ARMS: {k.ARMS!r}; known arms {sorted(ARMS)}, and `auto` (the baseline) is required")
+    arms = parse_arms(k.words("ARMS", required=True))
     if cfg.no_cluster:
         checks.skip("needs the testenv client and its generated config (not a --no-cluster run)")
     cfg_file = cfg.config_dir / "client.toml"
@@ -120,6 +128,10 @@ def test_path_pin_ab(cfg, run, client, target, checks, knobs):
                 checks.passed(f"pin ok: {arm} drew from 1 candidate path in every session ({len(ok)}); churn {max(r['churn'] for r in ok)}")
         elif arm == "auto":
             known = [c for c in cands if c is not None]
+            if len(known) < len(cands):
+                void = True
+                checks.warn(f"auto: candidates NOT VERIFIED in {len(cands) - len(known)}/{len(ok)} sessions (no planner lines); "
+                            f"the baseline's path diversity is unknown")
             if known and max(known) <= 1:
                 void = True
                 checks.warn(f"auto drew from {max(known)} candidate path: the baseline has no diversity to lose, no arm can differ from it")

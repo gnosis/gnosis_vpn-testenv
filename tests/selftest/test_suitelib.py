@@ -349,3 +349,13 @@ def test_planner_ignores_ansi_and_the_cost_field():
 
 def test_planner_nothing_logged_is_zero_lines():
     assert planner.candidates(["INFO something else"])["lines"] == 0
+
+
+def test_t33_arms_need_auto_and_another_arm_each_once():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "regression"))
+    from test_t33_path_pin_ab import parse_arms
+    assert parse_arms(["auto", "pin-planner"]) == ["auto", "pin-planner"]
+    assert parse_arms(["no-explore", "auto", "pin-planner"]) == ["no-explore", "auto", "pin-planner"]
+    for bad in (["auto"], ["pin-planner"], ["auto", "auto"], ["auto", "pin-planner", "pin-planner"], ["auto", "pinned"]):
+        with pytest.raises(ValueError, match="knob ARMS"):
+            parse_arms(bad)
