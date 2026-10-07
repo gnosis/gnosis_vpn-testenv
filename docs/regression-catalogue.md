@@ -312,7 +312,7 @@ UNMEASURED FAIL. Deadman covered.
 | T30-hopcount-ab        | `REPS` (2) transfers at 1 hop and 0 hops; PASS iff 0-hop download median ≥ 1-hop                                                                                             | needs `HOPS0_ALSO=1`, `--allow-insecure`                     |
 | T31-frame-forensics    | inbound read-length histogram and slab analysis on a cold start; PASS iff no packed slab                                                                                     | needs the instrumented client (extension 3)                  |
 | T32-congestion-control | cubic vs bbr+fq in the client namespace, `PAIRS`=6 (3) ABBA; upload treated, download control; recorded                                                                      | needs `tcp_bbr` on the host                                  |
-| T33-path-pin-ab        | `auto` vs `pin-planner` (`max_cached_paths = 1`, no random return draws), `PAIRS`=6 (3) ABBA, restart per arm; WARN if the pin is not verified                               | `just test t33`; field effect needs a real network           |
+| T33-path-pin-ab        | `auto` vs `pin-planner` (`max_cached_paths = 1`, no random return draws), `PAIRS`=6 (3) ABBA, restart per arm; WARN if the pin is not verified                               | `just test t33`; comparison table in `t33-bandwidth.md`      |
 
 ## Open extensions
 
