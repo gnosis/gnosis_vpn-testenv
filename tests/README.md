@@ -12,8 +12,9 @@ probes run in a tools sidecar per client (`gnosis_vpn-client-tools`, image
 `docker/suite-tools`, started by `just client-start` with
 `--network container:gnosis_vpn-client`), so the client image stays the upstream
 one. Needs Python 3.11 or newer (`tomllib`; `conftest.py` refuses an older
-interpreter at start) and `pytest` (`apt install python3-pytest` or
-`pip install pytest`); everything else is the standard library.
+interpreter at start) and `pytest`; the Nix dev shell (`nix develop`, or direnv)
+provides both, otherwise `apt install python3-pytest` or `pip install pytest`.
+Everything else is the standard library.
 
 ```sh
 just up-nobuild                  # or: just up   — stack + target + clients
