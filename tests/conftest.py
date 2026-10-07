@@ -1,7 +1,7 @@
 """pytest glue for the regression suite (docs/regression-catalogue.md).
 
 THERE IS ONE RUN: `pytest` (via `just suite`) runs every gate and diagnostic in file order, t01 ... t24, every
-time. Runbook items (t25 ... t32) are collected only with --runbook or when named with --only. Shorten a run
+time. Runbook items (t25 ... t33) are collected only with --runbook or when named with --only. Shorten a run
 with --fast, --very-fast, --only/--skip, or a per-test knob (--knob T23_DUR=150 or the environment).
 
 Results go to SUITE_OUT_DIR/<run-id>/ (rows.jsonl, verdicts.jsonl, summary.csv, console.log, run.txt, logs/,
@@ -83,7 +83,7 @@ def pytest_addoption(parser):
     g.addoption("--skip", default="", metavar="tNN,tNN", help="drop these tests")
     g.addoption("--group", default="", metavar="NAME,NAME", help="run only these groups (preflight, throughput, realtime, "
                 "resilience, config, attribution, multiclient, endurance); t01 still runs first")
-    g.addoption("--runbook", action="store_true", help="also collect the runbook items t25 ... t32")
+    g.addoption("--runbook", action="store_true", help="also collect the runbook items t25 ... t33")
     g.addoption("--no-preconditions", action="store_true", help="do not force t01 in front of an --only selection")
     g.addoption("--client", default=None, metavar="CONTAINER", help="the client container under test (CLIENT)")
     g.addoption("--dest", default=None, metavar="ID", help="the destination id in client.toml to connect to (DEST)")
