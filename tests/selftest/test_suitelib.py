@@ -359,3 +359,32 @@ def test_t33_arms_need_auto_and_another_arm_each_once():
     for bad in (["auto"], ["pin-planner"], ["auto", "auto"], ["auto", "pin-planner", "pin-planner"], ["auto", "pinned"]):
         with pytest.raises(ValueError, match="knob ARMS"):
             parse_arms(bad)
+
+
+def test_t33_sign_test_p():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "regression"))
+    from test_t33_path_pin_ab import sign_test_p
+    assert (sign_test_p(6, 0), sign_test_p(0, 6), sign_test_p(5, 1), sign_test_p(3, 0), sign_test_p(3, 3)) == (0.031, 0.031, 0.219, 0.25, 1.0)
+    assert sign_test_p(0, 0) is None
+
+
+def test_t33_compare_and_report():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "regression"))
+    from test_t33_path_pin_ab import compare, render
+
+    def s(down, up, cands):
+        return {"down": down, "up": up, "complete": 2, "n": 2, "candidates": cands, "churn": cands}
+    got = {"auto": [s(4.0, 3.0, 2), s(4.0, 3.0, 2), None, s(4.0, 3.0, 2), s(4.0, 3.0, 2), s(4.0, 3.0, 2), s(4.0, 3.0, 2)],
+           "pin-planner": [s(5.0, 3.0, 1)] * 7}
+    c = compare(got, ["auto", "pin-planner"])
+    a, p = c["arms"]["auto"], c["arms"]["pin-planner"]
+    assert (a["sessions"], a["failed"], a["candidates"], p["candidates"]) == (6, 1, "2", "1")
+    d, u = p["down_vs_auto"], p["up_vs_auto"]
+    assert (d["ratio_median"], d["change_pct"], d["higher"], d["pairs"], d["p_sign"]) == (1.25, 25.0, 6, 6, 0.031)
+    assert d["reading"].startswith("higher than auto")
+    assert (u["higher"], u["lower"], u["p_sign"], u["reading"]) == (0, 0, None, "no consistent difference")
+    orders = [["auto", "pin-planner"], ["pin-planner", "auto"]] * 3 + [["auto", "pin-planner"]]
+    md = render(c, got, orders, [], "PAIRS=7")
+    assert "| pin-planner | download | 1.25 | +25.0 % | 6 / 0 of 6 | 0.031 |" in md
+    assert "| 3 | auto, pin-planner | failed | 5.00 / 3.00 |" in md
+    assert "Not comparable" in render(c, got, orders, ["PIN DID NOT TAKE: x"], "PAIRS=7")

@@ -8,10 +8,14 @@ candidate paths the planner drew from in that session's log (suitelib/planner.py
 
 Pin check first: every pinned session must read candidates = 1, or the comparison is void (WARN, `PIN DID NOT TAKE`); a
 pinned or `auto` session with no planner lines is NOT VERIFIED (WARN), never a pass. An `auto` that reads <= 1 candidate
-has no diversity to lose (WARN). Otherwise PASS, recording per arm the median and slowest session download, completions,
-and per pair the arm/auto download ratio with a sign count. Nothing is scored against a threshold: the localcluster has
-two relays at equal latency, so this checks the mechanism and the pipeline, not the field effect, which needs a real
-network (the VM bench in hoprnet#8408).
+has no diversity to lose (WARN). Otherwise PASS.
+
+Output: the bandwidth comparison is written to t33-bandwidth.md in the run directory and printed to the console: per arm
+the median, minimum and maximum session throughput in each direction; per non-auto arm and direction the median
+arm/auto ratio over pairs, the number of pairs in which the arm was higher, and the two-sided sign-test p-value; and
+every pair side by side. t33-sessions.csv has one row per session. Nothing is scored against a threshold: the
+localcluster has two relays at equal latency, so this checks the mechanism and the pipeline, not the field effect,
+which needs a real network (the VM bench in hoprnet#8408).
 
 Why: the field reports slow sessions, and #8408 proposes striping across paths as the cause. Three ways this
 measurement went wrong before it worked: the planner log was read from the connect, after the start-up fill, so the
@@ -19,6 +23,8 @@ baseline read "-" and a pin that never took would have passed unnoticed (the log
 distinct paths over a session were counted instead of candidates per draw, and a pinned planner that switches path at
 every refresh read as broken; and a second [connection.path_planner] table was appended to a config that had one, which
 the client refuses at start (tomlcfg.set_keys merges)."""
+import csv
+import math
 import os
 import shutil
 import statistics as st
@@ -100,9 +106,11 @@ def test_path_pin_ab(cfg, run, client, target, checks, knobs):
         return res
 
     got = {a: [] for a in arms}           # per arm, one entry per pass (None when the arm could not be measured)
+    orders = []                           # per pass, the arm order (ABBA)
     try:
         for p in range(1, k.PAIRS + 1):
-            for arm in (arms if p % 2 else list(reversed(arms))):
+            orders.append(arms if p % 2 else list(reversed(arms)))
+            for arm in orders[-1]:
                 got[arm].append(measure(arm, p))
     finally:
         shutil.copy(orig, cfg_file)       # the generated config and default logging come back whatever happened
@@ -110,7 +118,7 @@ def test_path_pin_ab(cfg, run, client, target, checks, knobs):
             checks.failed("restore: client restart on the original config failed; later tests start from a stopped client")
 
     # -- pin check: without it, the comparison is about nothing
-    void = False
+    issues = []
     for arm in arms:
         ok = [r for r in got[arm] if r]
         cands = [r["candidates"] for r in ok]
@@ -118,48 +126,137 @@ def test_path_pin_ab(cfg, run, client, target, checks, knobs):
             broken = [c for c in cands if c is not None and c > 1]
             missing = sum(1 for c in cands if c is None)
             if broken:
-                void = True
-                checks.failed(f"PIN DID NOT TAKE: {arm} drew from {max(broken)} candidate paths in {len(broken)}/{len(ok)} sessions; "
-                              f"[connection.path_planner] is not applied, the comparison is void")
+                issues.append(f"PIN DID NOT TAKE: {arm} drew from {max(broken)} candidate paths in {len(broken)}/{len(ok)} sessions")
+                checks.failed(f"{issues[-1]}; [connection.path_planner] is not applied, the comparison is void")
             if missing:
-                void = True
-                checks.warn(f"{arm}: pin NOT VERIFIED in {missing}/{len(ok)} sessions (no planner lines; is {PLANNER_DEBUG} reaching the client?)")
+                issues.append(f"{arm}: pin NOT VERIFIED in {missing}/{len(ok)} sessions (no planner lines)")
+                checks.warn(f"{issues[-1]}; is {PLANNER_DEBUG} reaching the client?")
             if ok and not broken and not missing:
                 checks.passed(f"pin ok: {arm} drew from 1 candidate path in every session ({len(ok)}); churn {max(r['churn'] for r in ok)}")
         elif arm == "auto":
             known = [c for c in cands if c is not None]
             if len(known) < len(cands):
-                void = True
-                checks.warn(f"auto: candidates NOT VERIFIED in {len(cands) - len(known)}/{len(ok)} sessions (no planner lines); "
-                            f"the baseline's path diversity is unknown")
+                issues.append(f"auto: candidates NOT VERIFIED in {len(cands) - len(known)}/{len(ok)} sessions (no planner lines)")
+                checks.warn(f"{issues[-1]}; the baseline's path diversity is unknown")
             if known and max(known) <= 1:
-                void = True
-                checks.warn(f"auto drew from {max(known)} candidate path: the baseline has no diversity to lose, no arm can differ from it")
+                issues.append(f"auto drew from {max(known)} candidate path: the baseline has no path diversity to lose")
+                checks.warn(issues[-1])
 
-    # -- comparison, paired by pass against auto
-    def per_arm(arm):
-        ok = [r for r in got[arm] if r]
-        d = [r["down"] for r in ok]
-        return {"sessions": len(ok), "failed": len(got[arm]) - len(ok),
-                "down_median": round(st.median(d), 3) if d else None, "down_slowest": min(d) if d else None,
-                "up_median": round(st.median([r["up"] for r in ok]), 3) if ok else None,
-                "transfers_complete": f"{sum(r['complete'] for r in ok)}/{sum(r['n'] for r in ok)}"}
+    # -- the bandwidth comparison
+    cmp = compare(got, arms)
+    report = render(cmp, got, orders, issues, f"PAIRS={k.PAIRS}, {cfg.q(cfg.reps, 2)} x {cfg.bytes / 1e6:g} MB each way per session")
+    (run / "t33-bandwidth.md").write_text(report)
+    write_sessions_csv(run / "t33-sessions.csv", got, orders)
+    print(report, flush=True)
+    checks.row(kind="summary", result=cmp, void=bool(issues))
 
-    res = {a: per_arm(a) for a in arms}
-    for arm in arms:
-        if arm == "auto":
-            continue
-        ratios = [b["down"] / a["down"] for a, b in zip(got["auto"], got[arm]) if a and b and a["down"] > 0 and b["down"] > 0]
-        res[arm]["vs_auto"] = {"median_down_ratio": round(st.median(ratios), 3) if ratios else None,
-                               "faster_pairs": sum(1 for r in ratios if r > 1), "pairs": len(ratios)}
-    checks.row(kind="summary", result=res, void=void)
-    line = "; ".join(f"{a}: down median {r['down_median']} slowest {r['down_slowest']} Mbit/s, {r['transfers_complete']} complete"
-                     + (f", {r['vs_auto']['median_down_ratio']}x auto ({r['vs_auto']['faster_pairs']}/{r['vs_auto']['pairs']} pairs faster)"
-                        if "vs_auto" in r else "") for a, r in res.items())
-    if void:
-        checks.record(f"not comparable (see above): {line}")
-    elif (all(res[a]["sessions"] for a in arms)
-          and all(res[a]["vs_auto"]["pairs"] for a in arms if a != "auto")):
+    line = "; ".join(f"{a} vs auto: " + ", ".join(f"{d}load {c['change_pct']:+.1f} % ({c['higher']}/{c['pairs']} pairs higher, p = {c['p_sign']})"
+                                                  for d in ("down", "up") if (c := r[f"{d}_vs_auto"])["pairs"])
+                     for a, r in cmp["arms"].items() if a != "auto" and r["down_vs_auto"]["pairs"])
+    line = (line or "no valid pair") + " - table in t33-bandwidth.md"
+    if issues:
+        checks.record(f"not comparable ({'; '.join(issues)}): {line}")
+    elif all(cmp["arms"][a]["sessions"] for a in arms) and all(cmp["arms"][a]["down_vs_auto"]["pairs"] for a in arms if a != "auto"):
         checks.passed(line)
     else:
         checks.warn(f"an arm has no measured session or no valid pair against auto: {line}")
+
+
+# -- comparison and report: pure functions over `got` ({arm: [session result or None per pass]}), see the selftest
+
+def sign_test_p(higher, lower):
+    """Two-sided exact sign test (ties dropped): the probability of a split at least this uneven if neither arm is
+    faster. 6/6 gives 0.031, 5/6 gives 0.22, so fewer than 6 pairs can never reach p < 0.05."""
+    n = higher + lower
+    if n == 0:
+        return None
+    tail = sum(math.comb(n, i) for i in range(min(higher, lower) + 1)) / 2 ** n
+    return round(min(1.0, 2 * tail), 3)
+
+
+def reading(c):
+    if not c["pairs"]:
+        return "no valid pair"
+    if c["p_sign"] is not None and c["p_sign"] < 0.05:
+        return f"{'higher' if c['change_pct'] > 0 else 'lower'} than auto in a consistent direction"
+    if c["pairs"] < 6:
+        return "too few pairs for a conclusion (at least 6 are needed)"
+    return "no consistent difference"
+
+
+def compare(got, arms):
+    def spread(xs):
+        return {"median": round(st.median(xs), 3), "min": min(xs), "max": max(xs)} if xs else None
+
+    out = {"arms": {}}
+    for a in arms:
+        ok = [r for r in got[a] if r]
+        cands = [r["candidates"] for r in ok if r["candidates"] is not None]
+        out["arms"][a] = {"sessions": len(ok), "failed": len(got[a]) - len(ok),
+                          "down": spread([r["down"] for r in ok]), "up": spread([r["up"] for r in ok]),
+                          "transfers_complete": f"{sum(r['complete'] for r in ok)}/{sum(r['n'] for r in ok)}",
+                          "candidates": f"{min(cands)}-{max(cands)}" if cands and min(cands) != max(cands) else (str(cands[0]) if cands else None)}
+    for a in arms:
+        if a == "auto":
+            continue
+        for d in ("down", "up"):
+            ratios = [y[d] / x[d] for x, y in zip(got["auto"], got[a]) if x and y and x[d] > 0 and y[d] > 0]
+            med = st.median(ratios) if ratios else None
+            higher, lower = sum(1 for r in ratios if r > 1), sum(1 for r in ratios if r < 1)
+            c = {"ratio_median": round(med, 3) if med else None, "change_pct": round((med - 1) * 100, 1) if med else 0.0,
+                 "higher": higher, "lower": lower, "pairs": len(ratios), "p_sign": sign_test_p(higher, lower)}
+            c["reading"] = reading(c)
+            out["arms"][a][f"{d}_vs_auto"] = c
+    return out
+
+
+def _f(x):
+    return "-" if x is None else f"{x:.2f}"
+
+
+def render(cmp, got, orders, issues, setup):
+    arms = list(cmp["arms"])
+    L = ["## T33-path-pin-ab: bandwidth, automatic path finding vs pinned path", "",
+         f"Setup: {setup}. Throughput is the median over one session's transfers, in Mbit/s.", "",
+         ("**Not comparable:** " + "; ".join(issues)) if issues else
+         "Validity checks: passed (every pinned session drew from 1 candidate path, auto from more than 1).", "",
+         "### Per arm", "",
+         "| Arm | Sessions | Download median | Download min-max | Upload median | Upload min-max | Transfers complete | Candidates per draw |",
+         "|---|---|---|---|---|---|---|---|"]
+    for a, r in cmp["arms"].items():
+        dn, up = r["down"] or {}, r["up"] or {}
+        sessions = f"{r['sessions']} ({r['failed']} failed)" if r["failed"] else str(r["sessions"])
+        L.append(f"| {a} | {sessions} | {_f(dn.get('median'))} | {_f(dn.get('min'))}-{_f(dn.get('max'))} | "
+                 f"{_f(up.get('median'))} | {_f(up.get('min'))}-{_f(up.get('max'))} | {r['transfers_complete']} | {r['candidates'] or '-'} |")
+    L += ["", "### Compared with auto (paired by pass)", "",
+          "| Arm | Direction | Median ratio | Change | Pairs higher / lower | Sign test p | Reading |",
+          "|---|---|---|---|---|---|---|"]
+    for a, r in cmp["arms"].items():
+        for d in ("down", "up"):
+            c = r.get(f"{d}_vs_auto")
+            if c:
+                L.append(f"| {a} | {d}load | {_f(c['ratio_median'])} | {c['change_pct']:+.1f} % | {c['higher']} / {c['lower']} of {c['pairs']} | "
+                         f"{'-' if c['p_sign'] is None else c['p_sign']} | {c['reading']} |")
+    L += ["", "### Per pair (download / upload, Mbit/s)", "",
+          "| Pair | Order | " + " | ".join(arms) + " |", "|---|---|" + "---|" * len(arms)]
+    for p, order in enumerate(orders):
+        cells = []
+        for a in arms:
+            r = got[a][p] if p < len(got[a]) else None
+            cells.append(f"{_f(r['down'])} / {_f(r['up'])}" if r else "failed")
+        L.append(f"| {p + 1} | {', '.join(order)} | " + " | ".join(cells) + " |")
+    L += ["", "A ratio above 1 means the arm was faster than auto. With fewer than 6 pairs no split reaches p < 0.05. On the "
+          "localcluster both relays have equal latency, so a ratio near 1 is the expected result; the field effect needs "
+          "a real network.", ""]
+    return "\n".join(L)
+
+
+def write_sessions_csv(path, got, orders):
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["pair", "position", "arm", "down_mbit", "up_mbit", "transfers_complete", "transfers", "candidates", "churn"])
+        for p, order in enumerate(orders):
+            for pos, a in enumerate(order, 1):
+                r = got[a][p] if p < len(got[a]) else None
+                vals = [r["down"], r["up"], r["complete"], r["n"], r["candidates"], r["churn"]] if r else [""] * 6
+                w.writerow([p + 1, pos, a, *vals])
