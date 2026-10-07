@@ -216,6 +216,7 @@ def test_t06_check_arm_counts_stalls_over_stall_max(rundir):
     assert last_verdict(rundir)["status"] == "PASS"
 
 
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="node-sampler.py reads per-pid CPU from /proc (Linux only)")
 def test_node_sampler_keeps_empty_slots_positional(tmp_path):
     """An empty pid or url slot keeps its index: node1 is still node1 when node0 has no pid and no url."""
     import os
