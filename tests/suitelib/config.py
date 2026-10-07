@@ -40,6 +40,7 @@ VERY_FAST = {
     "T22_LADDER": "1 2 4", "T22_CAP": 45,
     "T23_DUR": 60, "T23_INTERVAL": 30,
     "T24_DUR": 25,
+    "T33_PAIRS": 1,
 }
 
 

@@ -22,7 +22,7 @@ just suite --fast                # the catalogue's shorter durations; --very-fas
 just suite --only t09,t22        # one or a few tests (t01 still runs first); --skip tNN drops one
 just suite --group realtime      # one group: preflight, throughput, realtime, resilience, config, attribution, multiclient, endurance
 just suite --knob T22_LADDER="1 2"   # a per-test knob (or T22_LADDER="1 2" in the environment)
-just test t04                    # one test, without t01 in front; runbook items (t25 … t32) run this way too
+just test t04                    # one test, without t01 in front; runbook items (t25 … t33) run this way too
 just suite --runbook             # include the runbook items in a run
 just matrix tests/cells/example.cells --fast
 just suite-selftest              # offline unit tests of suitelib, no stack
