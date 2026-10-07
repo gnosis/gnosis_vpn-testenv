@@ -146,7 +146,8 @@ def test_path_pin_ab(cfg, run, client, target, checks, knobs):
                         if "vs_auto" in r else "") for a, r in res.items())
     if void:
         checks.record(f"not comparable (see above): {line}")
-    elif all(res[a]["sessions"] for a in arms):
+    elif (all(res[a]["sessions"] for a in arms)
+          and all(res[a]["vs_auto"]["pairs"] for a in arms if a != "auto")):
         checks.passed(line)
     else:
-        checks.warn(f"an arm has no measured session: {line}")
+        checks.warn(f"an arm has no measured session or no valid pair against auto: {line}")
