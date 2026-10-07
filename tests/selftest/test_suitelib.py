@@ -303,3 +303,20 @@ def test_netem_count_is_none_when_tc_fails(tmp_path, monkeypatch):
     assert Cluster.netem_status() == (None, "RTNETLINK answers: Operation not permitted")
     fake.write_text("#!/bin/sh\necho 'qdisc noqueue 0: dev lo root refcnt 2'\n")
     assert Cluster.netem_count() == 0
+
+
+def test_tomlcfg_set_keys_merges_into_an_existing_table(tmp_path):
+    # T33-path-pin-ab: a second [connection.path_planner] header makes the client refuse its config (exit 66)
+    import tomllib
+    f = tmp_path / "c.toml"
+    f.write_text("[connection.path_planner]  # the network's own\nmin_paths_anonymity_floor = 3\nreturn_path_exploration = 0.1\n\n[strategy]\nk = 1\n")
+    tomlcfg.set_keys(f, "[connection.path_planner]", max_cached_paths="1", return_path_exploration="0.0")
+    t = f.read_text()
+    assert t.count("connection.path_planner") == 1
+    pp = tomllib.loads(t)["connection"]["path_planner"]
+    assert pp == {"max_cached_paths": 1, "return_path_exploration": 0.0, "min_paths_anonymity_floor": 3}
+    assert tomllib.loads(t)["strategy"]["k"] == 1
+    g = tmp_path / "d.toml"
+    g.write_text("version = 6\n\n[connection]\nprobe_local_addresses = true\n")
+    tomlcfg.set_keys(g, "[connection.path_planner]", max_cached_paths="1")
+    assert tomllib.loads(g.read_text())["connection"] == {"probe_local_addresses": True, "path_planner": {"max_cached_paths": 1}}
