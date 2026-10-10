@@ -31,14 +31,14 @@ CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/
 
 # The PIX deposit pool both ends settle through when PIX is on: `test` (visible secp256k1
 # transfers) or `curvy` (anonymous, through the Curvy deployment `curvy-stack-up` runs next to the
-# cluster). It picks the hoprd binary and the client image together, because the curve each pool
-# settles to is network-wide and never negotiated — see the note on build-cluster. Set by `up-curvy`.
+# cluster). It picks the hoprd binary, because the curve each pool settles to is network-wide and
+# never negotiated — see the note on build-cluster. Set by `up-curvy`.
 # Empty rather than "test" so pix/run.sh still reaches its detect-the-pool-from-the-client-image path.
 CLUSTER_PIX_POOL := env_var_or_default("CLUSTER_PIX_POOL", "")
 HOPRD_PACKAGE    := if CLUSTER_PIX_POOL == "curvy" { "binary-hoprd-pix-curvy-x86_64-linux" } else { "binary-hoprd-pix-test-x86_64-linux" }
 HOPRD_RESULT     := if CLUSTER_PIX_POOL == "curvy" { "result-hoprd-pix-curvy" } else { "result-hoprd" }
-CLIENT_IMAGE     := env_var_or_default("CLIENT_IMAGE", if CLUSTER_PIX_POOL == "curvy" { "gnosis_vpn-client:pix-curvy" } else { "gnosis_vpn-client" })   # env override per cell (T26-version-matrix); the pix-curvy tag under the Curvy pool
-CLIENT_BUILD     := if CLUSTER_PIX_POOL == "curvy" { "docker-build-pix-curvy" } else { "docker-build" }
+# gnosis_vpn-client builds one image whatever the pool: its edgli takes edge-client's default, `pix-curvy`.
+CLIENT_IMAGE     := env_var_or_default("CLIENT_IMAGE", "gnosis_vpn-client")   # env override per cell (T26-version-matrix)
 
 # The Curvy stack is published on the Docker bridge's gateway, so the host-native nodes and the
 # client container reach it at the same address. Its gateway (relayer, indexer) moves off 3000,
@@ -145,16 +145,14 @@ default:
 
 # ─── Build ───────────────────────────────────────────────────────────────────
 
-# The node binary is the `pix-test` variant, not the default `binary-hoprd`. gnosis_vpn-client
-# builds edgli with `pix-test`, i.e. `hopr-lib/pix-secp256k1`, and turns PIX on for the main
-# tunnel session by default — while `binary-hoprd` takes hopr-lib's default, `pix-bjj`. The curve
-# is a network-wide invariant that nothing negotiates, so a bjj Exit refuses every session this
-# client opens with `UnacceptablePixParams` ("refusing a client offering a PIX curve suite this
-# node was not built for" in the node log) and no destination ever connects. `hoprd-localcluster`
-# is already built against hoprd's `strategy-pix-test`, so only the node binary was mismatched.
+# The node binary is the `pix-test` variant (`hopr-lib/pix-secp256k1`), or `pix-curvy` under
+# CLUSTER_PIX_POOL=curvy. The curve is a network-wide invariant that nothing negotiates, so an Exit
+# refuses every PIX session from a client built for the other one with `UnacceptablePixParams`
+# ("refusing a client offering a PIX curve suite this node was not built for" in the node log).
+# Since gnosis_vpn-client #849 the client always builds edgli's default, `pix-curvy`, so only
+# `up-curvy` pairs with it for PIX; plain `up` turns PIX off in the client config, where the curve
+# does not matter.
 # Build hoprd and hoprd-localcluster binaries via nix
-# With CLUSTER_PIX_POOL=curvy the node is the `pix-curvy` variant instead, and the client is built
-# with edgli's `pix-curvy` to match.
 build-cluster:
     nix build -L --out-link {{HOPRD_DIR}}/{{HOPRD_RESULT}} {{HOPRD_DIR}}#{{HOPRD_PACKAGE}}
     nix build -L --out-link {{HOPRD_DIR}}/result-localcluster {{HOPRD_DIR}}#binary-hoprd-localcluster
@@ -163,9 +161,9 @@ build-cluster:
 build-server:
     cd {{GVPN_SERVER_DIR}} && just docker-build
 
-# Build gnosis_vpn-client Docker image (the `pix-curvy` variant under CLUSTER_PIX_POOL=curvy)
+# Build gnosis_vpn-client Docker image
 build-client:
-    cd {{GVPN_CLIENT_DIR}} && just {{CLIENT_BUILD}}
+    cd {{GVPN_CLIENT_DIR}} && just docker-build
 
 # Build gnosis_vpn-client binaries only (no Docker image) — for the host-native client
 build-client-native:

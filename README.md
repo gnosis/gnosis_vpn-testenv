@@ -187,17 +187,22 @@ Both ends have to agree or nothing settles, which is why one switch
 and which PIX block `gen-config` emits:
 
 - **dimensions.** The per-SSA quota is
-  `num_ssa_parts × (ssa_part_size + additional_shares) × 1038`, and hopr-lib's
-  defaults put it at ~649 MiB — one cycle would need that much downstream
-  traffic. The cluster's demo geometry is `8 × (2+2) × 1038` = 33 216 B and
-  completes in seconds. Its exit also accepts only quotas in `0 … 1 MiB`, so a
-  mismatched client is refused outright with `UnacceptablePixParams`. Matching
-  it needs `[connection.pix.dimensions]`, which is why this test requires a
-  `gnosis_vpn-client` carrying that config key.
+  `num_ssa_parts × (ssa_part_size + additional_shares) × 1452`: the exit counts
+  it in packets, one share per exit → client packet, each priced at the 1452 B
+  Session MTU (hoprnet #8478; 1038 B before). hopr-lib's defaults put it in the
+  hundreds of MiB — one cycle would need that much downstream traffic. The
+  cluster's demo geometry is `8 × (2+2) × 1452` = 46 464 B and completes in
+  seconds. Its exit also accepts only quotas in `0 … 1 MiB`, so a mismatched
+  client is refused outright with `UnacceptablePixParams`. Matching it needs
+  `[connection.pix.dimensions]` in a config of `version = 7` — under 6 the
+  client logs "ignoring unsupported key" for both PIX sections and offers
+  hopr-lib's defaults.
 - **price.** `price_per_byte` is _not_ negotiated: each side multiplies the
   agreed quota by its own configured price, so a mismatch leaves the exit
   waiting for a deposit that will never arrive while the client believes it has
-  paid.
+  paid. The cluster rescales its price whenever the bytes a share is priced at
+  change, so a deposit stays at ≈3.32 wxHOPR; it is `0.0000715 wxHOPR` per byte
+  since hoprd #202.
 
 The run takes roughly five minutes on top of `up-pix`, most of it a 180 s
 traffic window. Cycles are paced by the SSA exchange rather than by bytes — each
@@ -214,14 +219,18 @@ PIX income. The exactness is carried instead by the integer PIX counters and by
 
 ```sh
 just up-curvy          # up-pix, but settling through a local Curvy deployment
-just system-test-pix   # the same test; it reads the pool off the client image
+just system-test-pix   # the same test; it reads the pool off the client container
 just down              # also removes the Curvy stack
 ```
 
-`CLUSTER_PIX_POOL=curvy` (set by `up-curvy`) swaps both ends to the anonymous
-Baby JubJub pool: hoprd's `binary-hoprd-pix-curvy`, and the client's
-`docker-build-pix-curvy` image. The two have to change together, for the same
-curve reason as above.
+`CLUSTER_PIX_POOL=curvy` (set by `up-curvy`) swaps the cluster to the anonymous
+Baby JubJub pool, hoprd's `binary-hoprd-pix-curvy`. The client has no switch:
+since gnosis_vpn-client #849 it is one image, built against edgli's default
+pool, `pix-curvy`. So a current client settles PIX only against `up-curvy`;
+`up-pix`'s `pix-test` exits refuse it for the curve reason above ("refusing a
+client offering a PIX curve suite this node was not built for",
+`offered=BabyJubJub ours=secp256k1`), and that stack needs a client from before
+#849.
 
 The Curvy deployment — chain with Blokli, relayer, indexer, batch prover and
 gateway, pinned by hoprd's `localcluster/curvy/release.json` — comes up first,
@@ -560,14 +569,15 @@ your host firewall.
 - Exit-node (`gnosis_vpn-server`) containers are unaffected by this change and
   don't join `DOCKER_NETWORK` — the cluster already reaches their published host
   ports directly, as before.
-- `build-cluster` builds `binary-hoprd-pix-test-x86_64-linux`, not the default
-  `binary-hoprd`. gnosis_vpn-client builds `edgli` with `pix-test`
-  (`hopr-lib/pix-secp256k1`) and enables PIX for the main tunnel session by
-  default, while `binary-hoprd` takes hopr-lib's default `pix-bjj`. The curve is
-  a network-wide invariant that nothing negotiates, so a `pix-bjj` exit refuses
-  every session this client opens (`UnacceptablePixParams`, logged on the node
-  as "refusing a client offering a PIX curve suite this node was not built
-  for").
+- `build-cluster` builds `binary-hoprd-pix-test-x86_64-linux` (the `test`
+  pool, `hopr-lib/pix-secp256k1`), or `binary-hoprd-pix-curvy-x86_64-linux`
+  under `CLUSTER_PIX_POOL=curvy`. The curve is a network-wide invariant that
+  nothing negotiates, so an exit refuses every PIX session from a client built
+  for the other one (`UnacceptablePixParams`, logged on the node as "refusing a
+  client offering a PIX curve suite this node was not built for"). Since
+  gnosis_vpn-client #849 the client always builds edgli's default, `pix-curvy`
+  (Baby JubJub), so only `up-curvy` pairs with it for PIX; plain `up` turns PIX
+  off in the client config, where the curve does not matter.
 - The client's post-connect tunnel ping is hardcoded to `10.128.0.1`
   (`ping::Options::default()` in `core::runner::tunnel_ping_loop`) and does not
   read `[connection.ping] address`, which only the connect-time verification
@@ -583,7 +593,7 @@ your host firewall.
 - PIX _settles_ only if the exit also runs the `Pix` strategy, which is opt-in
   and not part of hoprd's default strategy set.
   `hoprd-localcluster --enable-pix` adds it, and its demo geometry caps the
-  accepted per-SSA quota at 1 MiB — well under hopr-lib's default ≈649 MiB, so
+  accepted per-SSA quota at 1 MiB — well under hopr-lib's default, so
   the client has to be sized down to match. `up-pix` does both halves:
   `--enable-pix` on the cluster and `templates/pix-on.toml.tpl` on the client
   (see "PIX" above). Plain `up` passes neither, so its exits accept PIX sessions
