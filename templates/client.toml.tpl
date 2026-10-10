@@ -1,4 +1,4 @@
-version = 6
+version = 7
 
 ${DESTINATIONS}
 # the local cluster announces private/local IPs (Docker network, or loopback in

@@ -23,7 +23,7 @@
 # the money moves differently: the client's Safe pays once, shielding a float into the Curvy vault
 # that every deposit is then allocated out of, and the vault pays the exit less its withdrawal fee.
 # So the exit's income is asserted net of that fee, and the client's Safe is reported, not asserted.
-# The pool is read off the client image `up-curvy` starts; CLUSTER_PIX_POOL overrides it.
+# The pool is read off the client container `up-curvy` starts; CLUSTER_PIX_POOL overrides it.
 #
 # Requires jq, curl, bc and docker. Budget ~5 minutes after the stack is up.
 
@@ -48,7 +48,7 @@ DESTINATION="${DESTINATION:-}"
 # What buys cycles is wall-clock time with traffic flowing, hence a duration rather than a count.
 PING_SECONDS="${PING_SECONDS:-180}"
 PING_INTERVAL="${PING_INTERVAL:-0.2}"
-# Reply + ICMP/IP headers + WireGuard overhead has to stay under the 1038 B HOPR payload, or one
+# Reply + ICMP/IP headers + WireGuard overhead has to stay under the 1452 B Session MTU, or one
 # reply costs two packets and the byte accounting below stops being a floor.
 PING_SIZE="${PING_SIZE:-900}"
 
@@ -179,14 +179,17 @@ if [ "$(docker inspect "$CLIENT_CONTAINER" 2>/dev/null | jq -r '.[0].State.Runni
     exit 2
 fi
 
-# Which deposit pool this stack settles through: `up-curvy` starts the client from its `pix-curvy`
-# image, and the node binary it pairs with is chosen by the same switch.
+# Which deposit pool this stack settles through: `up-curvy` starts the client with the Curvy proving
+# keys mounted, and the node binary it pairs with is chosen by the same switch. Read off the container
+# rather than its image, since gnosis_vpn-client builds one image whatever the pool.
 POOL="${CLUSTER_PIX_POOL:-}"
 if [ -z "$POOL" ]; then
-    case "$(docker inspect "$CLIENT_CONTAINER" 2>/dev/null | jq -r '.[0].Config.Image // empty')" in
-    *:pix-curvy) POOL="curvy" ;;
-    *) POOL="test" ;;
-    esac
+    if docker inspect "$CLIENT_CONTAINER" 2>/dev/null |
+        jq -e '.[0].Config.Env // [] | any(startswith("CURVY_ZK_KEYS_DIR="))' >/dev/null; then
+        POOL="curvy"
+    else
+        POOL="test"
+    fi
 fi
 case "$POOL" in
 test) SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-180}" ;;
@@ -219,9 +222,10 @@ SSA_PART_SIZE=$(pix_dim ssa_part_size)
 ADDITIONAL_SHARES=$(pix_dim additional_shares)
 PRICE_PER_BYTE=$(grep -A3 '^\[pix_strategy\]' "${CONFIG_DIR}/client.toml" | awk '$1 == "price_per_byte" { gsub(/"/, "", $3); print $3; exit }')
 
-# PACKET_PAYLOAD_SIZE — hopr-lib's HoprPacket::PAYLOAD_SIZE.
-PAYLOAD_SIZE=1038
-QUOTA=$((NUM_SSA_PARTS * (SSA_PART_SIZE + ADDITIONAL_SHARES) * PAYLOAD_SIZE))
+# hopr-lib's PIX_QUOTA_BYTES_PER_SHARE, the Session MTU: the Exit counts quota in packets, one share
+# per Exit -> Entry packet, and prices each at what a Session packet can carry (hoprnet #8478).
+SHARE_BYTES=1452
+QUOTA=$((NUM_SSA_PARTS * (SSA_PART_SIZE + ADDITIONAL_SHARES) * SHARE_BYTES))
 PER_CYCLE=$(calc "$PRICE_PER_BYTE * $QUOTA")
 
 # ─── Resolve the exit ──────────────────────────────────────────────────────────
@@ -230,10 +234,11 @@ echo "-- waiting for destinations"
 ready_destination() {
     local id
     # `route_health.state` is internally tagged, so the variant name is a `state` field rather than
-    # the object's only key.
+    # the object's only key. Clients since gnosis_vpn-client #843 report a connectable exit as
+    # `Routable`; older ones as `ReadyToConnect`.
     id=$(ctl_json status | jq -r '
         .Status.destinations[]
-        | select(.route_health.state.state == "ReadyToConnect")
+        | select(.route_health.state.state == "ReadyToConnect" or .route_health.state.state == "Routable")
         | .destination.id' | head -1)
     [ -n "$id" ] && {
         READY_ID="$id"
