@@ -2,28 +2,29 @@
 #
 # system-test-pix — drive a full PIX cycle through the VPN tunnel and assert the exit was paid.
 #
-# PIX makes an exit earn per byte it delivers back to the client. The exchange is: the exit asks the
-# client to commit to an SSA, the client deposits `price_per_byte × quota` to a stealth address, the
-# exit watches that address and defuses its kill switch when the deposit lands, downstream packets
-# carry the SSA's shares home on spent SURBs until the exit can reconstruct the stealth key, and the
-# exit sweeps the deposit into its Safe. One cycle covers exactly `quota` bytes of exit → client
-# data, so the exit's income and the traffic it served are the same number seen from two sides --
-# which is what this test asserts.
+# PIX makes an exit earn per packet it delivers back to the client. The exchange is: the exit asks
+# the client to commit to an SSA, the client deposits `price_per_byte × quota` to a stealth address,
+# the exit watches that address and defuses its kill switch when the deposit lands, downstream
+# packets carry the SSA's shares home on spent SURBs until the exit can reconstruct the stealth key,
+# and the exit sweeps the deposit into its Safe. One cycle pays for exactly
+# `num_ssa_parts × (ssa_part_size + additional_shares)` exit → client packets, one share each, so the
+# exit's income and the traffic it served can be checked against each other from two sides -- which
+# is what this test does.
 #
-# It drives the containerised client (`just up-pix`), so no sudo and no host routing changes: the
+# It drives the containerised client (`just up-pix-test`), so no sudo and no host routing changes: the
 # traffic is ICMP from inside the client container's own network namespace, where the full-tunnel
 # routes live. Everything asserted is read from the exit's own Prometheus endpoint and REST API and
 # from `gnosis_vpn-ctl` -- nothing is computed here.
 #
-#   just up-pix
+#   just up-pix-test
 #   just system-test-pix
 #   just system-test-pix --seconds 300   # a longer window, so more cycles
 #
-# Against the Curvy pool (`just up-curvy`) the same cycle runs and the same counters are asserted, but
+# Against the Curvy pool (`just up-pix-curvy`) the same cycle runs and the same counters are asserted, but
 # the money moves differently: the client's Safe pays once, shielding a float into the Curvy vault
 # that every deposit is then allocated out of, and the vault pays the exit less its withdrawal fee.
 # So the exit's income is asserted net of that fee, and the client's Safe is reported, not asserted.
-# The pool is read off the client container `up-curvy` starts; CLUSTER_PIX_POOL overrides it.
+# The pool is read off the client container `up-pix-curvy` starts; CLUSTER_PIX_POOL overrides it.
 #
 # Requires jq, curl, bc and docker. Budget ~5 minutes after the stack is up.
 
@@ -49,7 +50,7 @@ DESTINATION="${DESTINATION:-}"
 PING_SECONDS="${PING_SECONDS:-180}"
 PING_INTERVAL="${PING_INTERVAL:-0.2}"
 # Reply + ICMP/IP headers + WireGuard overhead has to stay under the 1452 B Session MTU, or one
-# reply costs two packets and the byte accounting below stops being a floor.
+# reply costs two packets and the packet accounting below stops being a floor.
 PING_SIZE="${PING_SIZE:-900}"
 
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
@@ -59,6 +60,9 @@ DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-60}"
 # in-flight cycle room to land after the traffic stops. A Curvy sweep is a withdrawal proof plus its
 # transaction on top, so that pool gets longer (see below).
 SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-}"
+# The client caches its balances and refreshes them every 60 s, so its Safe can trail the exit's
+# sweeps by a deposit; on the test pool the payment check waits up to this long for it to catch up.
+CLIENT_BALANCE_TIMEOUT="${CLIENT_BALANCE_TIMEOUT:-90}"
 
 # Ceiling on the Curvy vault's withdrawal fee, in basis points, that the exit's income is allowed
 # to lose to it. The pinned local chain charges 20; hoprd's own soak sizes against the same 100.
@@ -170,18 +174,18 @@ done
 }
 
 if [ "$(status_json | jq -r '.state // "not_running"')" != "running" ]; then
-    echo "cluster is not running — run 'just up-pix' first" >&2
+    echo "cluster is not running — run 'just up-pix-test' or 'just up-pix-curvy' first" >&2
     exit 2
 fi
 
 if [ "$(docker inspect "$CLIENT_CONTAINER" 2>/dev/null | jq -r '.[0].State.Running // "false"')" != "true" ]; then
-    echo "container '$CLIENT_CONTAINER' is not running — run 'just up-pix' first" >&2
+    echo "container '$CLIENT_CONTAINER' is not running — run 'just up-pix-test' or 'just up-pix-curvy' first" >&2
     exit 2
 fi
 
-# Which deposit pool this stack settles through: `up-curvy` starts the client with the Curvy proving
-# keys mounted, and the node binary it pairs with is chosen by the same switch. Read off the container
-# rather than its image, since gnosis_vpn-client builds one image whatever the pool.
+# Which deposit pool this stack settles through: only `up-pix-curvy` starts the client with the Curvy
+# proving keys mounted, and the node binary it pairs with is chosen by the same switch. Read off the
+# container rather than its image tag, which CLIENT_IMAGE can override.
 POOL="${CLUSTER_PIX_POOL:-}"
 if [ -z "$POOL" ]; then
     if docker inspect "$CLIENT_CONTAINER" 2>/dev/null |
@@ -205,12 +209,12 @@ esac
 # connects perfectly and earns nothing, which would otherwise read as "PIX is broken".
 if ! grep -qE '^\s+- Pix:' "${DATA_DIR}/hoprd_cfg_0.yaml" 2>/dev/null; then
     echo "the cluster was started without --enable-pix, so its exits run no PIX strategy." >&2
-    echo "Run 'just down && just up-pix'." >&2
+    echo "Run 'just down && just up-pix-test' (or 'just up-pix-curvy')." >&2
     exit 2
 fi
 if ! grep -A2 '^\[connection.pix.ping_main\]' "${CONFIG_DIR}/client.toml" 2>/dev/null | grep -q 'enabled = true'; then
     echo "${CONFIG_DIR}/client.toml has PIX disabled for the main session." >&2
-    echo "Run 'just down && just up-pix' to regenerate it." >&2
+    echo "Run 'just down && just up-pix-test' (or 'just up-pix-curvy') to regenerate it." >&2
     exit 2
 fi
 
@@ -225,7 +229,11 @@ PRICE_PER_BYTE=$(grep -A3 '^\[pix_strategy\]' "${CONFIG_DIR}/client.toml" | awk 
 # hopr-lib's PIX_QUOTA_BYTES_PER_SHARE, the Session MTU: the Exit counts quota in packets, one share
 # per Exit -> Entry packet, and prices each at what a Session packet can carry (hoprnet #8478).
 SHARE_BYTES=1452
-QUOTA=$((NUM_SSA_PARTS * (SSA_PART_SIZE + ADDITIONAL_SHARES) * SHARE_BYTES))
+SHARES_PER_CYCLE=$((NUM_SSA_PARTS * (SSA_PART_SIZE + ADDITIONAL_SHARES)))
+QUOTA=$((SHARES_PER_CYCLE * SHARE_BYTES))
+# The useful shares the exit needs to recover one stealth key: `num_ssa_parts × ssa_part_size`. The
+# additional shares are insurance against loss, paid for but not needed for recovery.
+SHARES_PER_KEY=$((NUM_SSA_PARTS * SSA_PART_SIZE))
 PER_CYCLE=$(calc "$PRICE_PER_BYTE * $QUOTA")
 
 # ─── Resolve the exit ──────────────────────────────────────────────────────────
@@ -316,6 +324,9 @@ printf '   %s replies, %s B delivered downstream\n' "$RECEIVED" "$DELIVERED"
 
 # ─── Settle ────────────────────────────────────────────────────────────────────
 
+# Settled means the sweep count has held for three polls and no recovered key is still waiting for
+# its sweep. A Curvy sweep is a withdrawal proof plus its transaction and can outlast the three polls,
+# and its wxHOPR would then reach the exit's Safe without being counted as a cycle.
 echo "-- waiting for in-flight cycles to settle"
 last=-1
 stable=0
@@ -323,9 +334,11 @@ waited=0
 while [ "$waited" -lt "$SETTLE_TIMEOUT" ]; do
     curl -s --max-time 5 "${EXIT_API}/metrics" >"$SCRAPE_AFTER" 2>/dev/null
     now=$(metric "$SCRAPE_AFTER" hopr_strategy_pix_sweeps)
+    keys_now=$(metric "$SCRAPE_AFTER" hopr_strategy_pix_keys_recovered)
     if [ "$now" = "$last" ]; then
         stable=$((stable + 1))
-        [ "$stable" -ge 3 ] && [ "$now" -gt "$SWEEPS_BEFORE" ] && break
+        [ "$stable" -ge 3 ] && [ "$now" -gt "$SWEEPS_BEFORE" ] &&
+            [ "$((now - SWEEPS_BEFORE))" -ge "$((keys_now - KEYS_BEFORE))" ] && break
     else
         stable=0
     fi
@@ -339,15 +352,28 @@ KEYS_AFTER=$(metric "$SCRAPE_AFTER" hopr_strategy_pix_keys_recovered)
 CONFIRMED_AFTER=$(metric "$SCRAPE_AFTER" hopr_strategy_pix_deposit_tracking 'outcome="confirmed"')
 GENERATED_AFTER=$(metric "$SCRAPE_AFTER" hopr_strategy_pix_deposit_data 'outcome="generated"')
 EXIT_SAFE_AFTER=$(exit_balance safeHopr)
-CLIENT_SAFE_AFTER=$(client_safe_wxhopr)
 
 N=$((SWEEPS_AFTER - SWEEPS_BEFORE))
 KEYS=$((KEYS_AFTER - KEYS_BEFORE))
 CONFIRMED=$((CONFIRMED_AFTER - CONFIRMED_BEFORE))
 GENERATED=$((GENERATED_AFTER - GENERATED_BEFORE))
 EXIT_GAIN=$(calc "$EXIT_SAFE_AFTER - $EXIT_SAFE_BEFORE")
-CLIENT_SPENT=$(calc "$CLIENT_SAFE_BEFORE - $CLIENT_SAFE_AFTER")
 EXPECTED=$(calc "$N * $PER_CYCLE")
+
+# The deposits behind the last sweeps can still be missing from the client's cached balance. On the
+# test pool, where the client's payment is asserted, give its next refresh the chance to show them.
+CLIENT_SAFE_AFTER=$(client_safe_wxhopr)
+if [ "$POOL" = "test" ] && ! ge "$(calc "$CLIENT_SAFE_BEFORE - $CLIENT_SAFE_AFTER")" "$EXPECTED"; then
+    echo "-- waiting for the client's Safe to show the swept deposits"
+    waited=0
+    while [ "$waited" -lt "$CLIENT_BALANCE_TIMEOUT" ]; do
+        sleep 5
+        waited=$((waited + 5))
+        CLIENT_SAFE_AFTER=$(client_safe_wxhopr)
+        ge "$(calc "$CLIENT_SAFE_BEFORE - $CLIENT_SAFE_AFTER")" "$EXPECTED" && break
+    done
+fi
+CLIENT_SPENT=$(calc "$CLIENT_SAFE_BEFORE - $CLIENT_SAFE_AFTER")
 if [ "$POOL" = "curvy" ]; then
     # What the exit is owed after the vault's withdrawal fee, at the ceiling.
     EXPECTED_EXIT=$(calc "$EXPECTED * (10000 - $CURVY_FEE_CEILING_BPS) / 10000")
@@ -368,7 +394,8 @@ if [ "$POOL" = "curvy" ]; then
 else
     printf '  client safe:     %s -> %s  (-%s wxHOPR)\n' "$CLIENT_SAFE_BEFORE" "$CLIENT_SAFE_AFTER" "$CLIENT_SPENT"
 fi
-printf '  delivered:       %s B downstream, %s B covered by %s cycle(s)\n' "$DELIVERED" "$((N * QUOTA))" "$N"
+printf '  delivered:       %s replies, %s B downstream; %s cycle(s) paid for %s packets (%s B of quota)\n' \
+    "$RECEIVED" "$DELIVERED" "$N" "$((N * SHARES_PER_CYCLE))" "$((N * QUOTA))"
 # Reported rather than asserted: with auto-redeeming on, ticket income can land in the same Safe, so
 # a ratio above the cycle count is legitimate. A whole number here is PIX and nothing else.
 if [ "$N" -gt 0 ] && [ "$POOL" = "curvy" ]; then
@@ -409,8 +436,14 @@ else
     check "$(ge "$CLIENT_SPENT" "$EXPECTED" && echo 1 || echo 0)" \
         "client paid what the exit earned" "-${CLIENT_SPENT} >= ${EXPECTED} wxHOPR"
 fi
-check "$([ "$DELIVERED" -ge "$((N * QUOTA))" ] && echo 1 || echo 0)" \
-    "income corresponds to data delivered" "${DELIVERED} B >= ${N} x ${QUOTA} B"
+# Each share rides home on one exit → client packet, and the exit can recover a cycle's key only once
+# SHARES_PER_KEY of them have arrived, so every recovered key is a floor on the packets the client
+# received. Packets, not bytes: a share is priced at the Session MTU whatever its packet carries, so
+# the paid quota exceeds the bytes of these smaller replies whenever the replies keep pace with the
+# cycles. Only the echo replies are counted; the client's 10 s liveness ping also carries shares,
+# which at the default 5 replies a second is noise.
+check "$([ "$RECEIVED" -ge "$((KEYS * SHARES_PER_KEY))" ] && echo 1 || echo 0)" \
+    "replies carried every recovered key" "${RECEIVED} replies >= ${KEYS} keys x ${SHARES_PER_KEY}"
 echo "====================================================================="
 
 if [ "$FAILURES" -gt 0 ]; then

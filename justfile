@@ -31,14 +31,16 @@ CHAIN_IMAGE  := env_var_or_default("CHAIN_IMAGE",  "europe-west3-docker.pkg.dev/
 
 # The PIX deposit pool both ends settle through when PIX is on: `test` (visible secp256k1
 # transfers) or `curvy` (anonymous, through the Curvy deployment `curvy-stack-up` runs next to the
-# cluster). It picks the hoprd binary, because the curve each pool settles to is network-wide and
-# never negotiated — see the note on build-cluster. Set by `up-curvy`.
-# Empty rather than "test" so pix/run.sh still reaches its detect-the-pool-from-the-client-image path.
+# cluster). It picks the hoprd binary and the client build together, because the curve each pool
+# settles to is network-wide and never negotiated — see the note on build-cluster. Set by
+# `up-pix-test` and `up-pix-curvy`. Empty (plain `up`) keeps the `pix-test` node and the shipping
+# client, whose config has PIX off; pix/run.sh then detects the pool from the client container.
 CLUSTER_PIX_POOL := env_var_or_default("CLUSTER_PIX_POOL", "")
 HOPRD_PACKAGE    := if CLUSTER_PIX_POOL == "curvy" { "binary-hoprd-pix-curvy-x86_64-linux" } else { "binary-hoprd-pix-test-x86_64-linux" }
 HOPRD_RESULT     := if CLUSTER_PIX_POOL == "curvy" { "result-hoprd-pix-curvy" } else { "result-hoprd" }
-# gnosis_vpn-client builds one image whatever the pool: its edgli takes edge-client's default, `pix-curvy`.
-CLIENT_IMAGE     := env_var_or_default("CLIENT_IMAGE", "gnosis_vpn-client")   # env override per cell (T26-version-matrix)
+# The client ships on the Curvy pool; gnosis_vpn-client builds the `pix-test` variant only on request.
+CLIENT_IMAGE     := env_var_or_default("CLIENT_IMAGE", if CLUSTER_PIX_POOL == "test" { "gnosis_vpn-client:pix-test" } else { "gnosis_vpn-client" })   # env override per cell (T26-version-matrix)
+CLIENT_BUILD     := if CLUSTER_PIX_POOL == "test" { "docker-build-pix-test" } else { "docker-build" }
 
 # The Curvy stack is published on the Docker bridge's gateway, so the host-native nodes and the
 # client container reach it at the same address. Its gateway (relayer, indexer) moves off 3000,
@@ -104,7 +106,7 @@ HOPS := env_var_or_default("HOPS", "1")
 
 # Non-empty starts the localcluster with `--enable-pix` and makes `gen-config` emit a PIX-enabled
 # client config sized to match it. One switch for both ends, because they only work in agreement —
-# see templates/pix-on.toml.tpl. Set by `up-pix`; `system-test-pix` needs it.
+# see templates/pix-on.toml.tpl. Set by `up-pix-test` and `up-pix-curvy`; `system-test-pix` needs it.
 CLUSTER_ENABLE_PIX := env_var_or_default("CLUSTER_ENABLE_PIX", "")
 
 # Log levels for each component (passed as RUST_LOG)
@@ -149,9 +151,9 @@ default:
 # CLUSTER_PIX_POOL=curvy. The curve is a network-wide invariant that nothing negotiates, so an Exit
 # refuses every PIX session from a client built for the other one with `UnacceptablePixParams`
 # ("refusing a client offering a PIX curve suite this node was not built for" in the node log).
-# Since gnosis_vpn-client #849 the client always builds edgli's default, `pix-curvy`, so only
-# `up-curvy` pairs with it for PIX; plain `up` turns PIX off in the client config, where the curve
-# does not matter.
+# gnosis_vpn-client ships on `pix-curvy` and builds `pix-test` only on request (`docker-build-pix-test`),
+# so `up-pix-test` builds that variant and `up-pix-curvy` the shipping one; plain `up` turns PIX off
+# in the client config, where the curve does not matter.
 # Build hoprd and hoprd-localcluster binaries via nix
 build-cluster:
     nix build -L --out-link {{HOPRD_DIR}}/{{HOPRD_RESULT}} {{HOPRD_DIR}}#{{HOPRD_PACKAGE}}
@@ -161,9 +163,9 @@ build-cluster:
 build-server:
     cd {{GVPN_SERVER_DIR}} && just docker-build
 
-# Build gnosis_vpn-client Docker image
+# Build gnosis_vpn-client Docker image (its opt-in `pix-test` variant under CLUSTER_PIX_POOL=test)
 build-client:
-    cd {{GVPN_CLIENT_DIR}} && just docker-build
+    cd {{GVPN_CLIENT_DIR}} && just {{CLIENT_BUILD}}
 
 # Build gnosis_vpn-client binaries only (no Docker image) — for the host-native client
 build-client-native:
@@ -461,18 +463,21 @@ metrics-stop:
 up: build metrics-start cluster-start cluster-wait server-start gen-config client-start
     @just summary
 
-# Re-invoked rather than composed, because CLUSTER_ENABLE_PIX has to be set before `up`'s
-# dependencies are evaluated — it steers both the cluster flag and which PIX block gen-config emits.
-# Bring the full stack up with PIX enabled end to end (see pix/run.sh)
-up-pix:
-    CLUSTER_ENABLE_PIX=1 just up
+# Re-invoked rather than composed, because CLUSTER_ENABLE_PIX and CLUSTER_PIX_POOL have to be set
+# before `up`'s dependencies are evaluated — they steer the cluster flag, which PIX block gen-config
+# emits, and which client is built and started. `env -u`: `set export` would hand the nested just
+# this recipe's own CLIENT_IMAGE, the shipping client, instead of recomputing the `pix-test` one from
+# CLUSTER_PIX_POOL; an explicit CLIENT_IMAGE does not survive it either.
+# Bring the full stack up with PIX settling through the test pool, both ends built for it (see pix/run.sh)
+up-pix-test:
+    env -u CLIENT_IMAGE CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=test just up
 
-# `env -u`: `set export` would hand the nested just this recipe's own HOPRD_BIN, keeping the
-# pix-test binary instead of recomputing the curvy one from CLUSTER_PIX_POOL.
-# `up-pix` against the Curvy pool: the Curvy stack comes up first, and the cluster runs on its chain.
+# `env -u`: `set export` would hand the nested just this recipe's own HOPRD_BIN and CLIENT_IMAGE,
+# keeping the pix-test binary instead of recomputing the curvy one from CLUSTER_PIX_POOL.
+# `up-pix-test` against the Curvy pool: the Curvy stack comes up first, and the cluster runs on its chain.
 # Bring the full stack up with PIX settling through Curvy (see pix/run.sh)
-up-curvy:
-    env -u HOPRD_BIN CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just build metrics-start curvy-stack-up cluster-start cluster-wait server-start gen-config client-start
+up-pix-curvy:
+    env -u HOPRD_BIN -u CLIENT_IMAGE CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just build metrics-start curvy-stack-up cluster-start cluster-wait server-start gen-config client-start
     @CLUSTER_ENABLE_PIX=1 CLUSTER_PIX_POOL=curvy just summary
 
 # See the caveat on client-start-on-host before using this instead of `up`

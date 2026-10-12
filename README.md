@@ -167,24 +167,32 @@ long before anything reaches the wire.
 ## Running the PIX system test
 
 ```sh
-just up-pix            # like `up`, but PIX enabled on the cluster *and* in the client config
+just up-pix-test       # like `up`, but PIX on the test pool, enabled on the cluster *and* in the client config
 just system-test-pix   # drive a full deposit → recover → sweep cycle and assert the exit's income
 just down
 ```
 
-PIX pays an exit per byte it delivers back to the client: the exit asks the
+PIX pays an exit per packet it delivers back to the client: the exit asks the
 client to commit to an SSA, the client deposits `price_per_byte × quota` to a
 stealth address, downstream packets carry that SSA's shares home on spent SURBs
 until the exit can reconstruct the stealth key, and the exit sweeps the deposit
-into its Safe. One cycle covers exactly `quota` bytes of exit → client data, so
-the exit's income and the traffic it served are the same number from two sides —
-which is what [`pix/run.sh`](pix/run.sh) asserts, entirely from the exit's own
-`/metrics` and REST API plus `gnosis_vpn-ctl`. It drives the _containerised_
-client, so unlike `system-tests` it needs no `sudo` and touches no host routing.
+into its Safe. One cycle pays for exactly
+`num_ssa_parts × (ssa_part_size + additional_shares)` exit → client packets, one
+share each, so the exit's income and the traffic it served can be checked
+against each other from two sides — which is what [`pix/run.sh`](pix/run.sh)
+does, entirely from the exit's own `/metrics` and REST API plus
+`gnosis_vpn-ctl`. It drives the _containerised_ client, so unlike `system-tests`
+it needs no `sudo` and touches no host routing.
+
+`up-pix-test` settles through the `test` pool, plain secp256k1 transfers, on
+both ends: hoprd's `binary-hoprd-pix-test` and gnosis_vpn-client's opt-in
+`pix-test` build (gnosis_vpn-client #906; `just docker-build-pix-test`, image
+`gnosis_vpn-client:pix-test`). The client ships on the Curvy pool, so that
+variant has to be asked for; `up-pix-curvy` (below) runs the shipping one.
 
 Both ends have to agree or nothing settles, which is why one switch
-(`CLUSTER_ENABLE_PIX`, set by `up-pix`) drives both the cluster's `--enable-pix`
-and which PIX block `gen-config` emits:
+(`CLUSTER_ENABLE_PIX`, set by `up-pix-test` and `up-pix-curvy`) drives both the
+cluster's `--enable-pix` and which PIX block `gen-config` emits:
 
 - **dimensions.** The per-SSA quota is
   `num_ssa_parts × (ssa_part_size + additional_shares) × 1452`: the exit counts
@@ -204,7 +212,7 @@ and which PIX block `gen-config` emits:
   change, so a deposit stays at ≈3.32 wxHOPR; it is `0.0000715 wxHOPR` per byte
   since hoprd #202.
 
-The run takes roughly five minutes on top of `up-pix`, most of it a 180 s
+The run takes roughly five minutes on top of `up-pix-test`, most of it a 180 s
 traffic window. Cycles are paced by the SSA exchange rather than by bytes — each
 waits on a deposit landing on chain and on enough of its shares riding home — so
 what buys more of them is a longer window, `--seconds N`, not more traffic.
@@ -215,22 +223,30 @@ credit the exit's Safe and its growth can only be required to be _at least_ the
 PIX income. The exactness is carried instead by the integer PIX counters and by
 `hopr_strategy_pix_last_sweep_hopr`, which is the wxHOPR of a single sweep.
 
+The traffic side is counted in packets, not bytes. A share is priced at the 1452
+B Session MTU whatever its packet carries, so the paid quota exceeds the bytes
+of the test's 928 B echo replies once the replies keep pace with the cycles, as
+they do on the fast test pool. What holds is that the exit recovers a cycle's
+key only after `num_ssa_parts × ssa_part_size` shares reached the client, so the
+run asserts at least that many replies per recovered key. On the test pool it
+also waits up to `CLIENT_BALANCE_TIMEOUT` (90 s) for the client's Safe to show
+the swept deposits: the client refreshes its balances every 60 s.
+
 ### Against the Curvy pool
 
 ```sh
-just up-curvy          # up-pix, but settling through a local Curvy deployment
+just up-pix-curvy      # up-pix-test, but settling through a local Curvy deployment
 just system-test-pix   # the same test; it reads the pool off the client container
 just down              # also removes the Curvy stack
 ```
 
-`CLUSTER_PIX_POOL=curvy` (set by `up-curvy`) swaps the cluster to the anonymous
-Baby JubJub pool, hoprd's `binary-hoprd-pix-curvy`. The client has no switch:
-since gnosis_vpn-client #849 it is one image, built against edgli's default
-pool, `pix-curvy`. So a current client settles PIX only against `up-curvy`;
-`up-pix`'s `pix-test` exits refuse it for the curve reason above ("refusing a
-client offering a PIX curve suite this node was not built for",
-`offered=BabyJubJub ours=secp256k1`), and that stack needs a client from before
-#849.
+`CLUSTER_PIX_POOL=curvy` (set by `up-pix-curvy`) swaps both ends to the
+anonymous Baby JubJub pool: hoprd's `binary-hoprd-pix-curvy`, and the client's
+shipping build (`docker-build`, on edgli's default pool, `pix-curvy`). The two
+have to change together: the curve is never negotiated, so an exit refuses every
+PIX session from a client built for the other pool ("refusing a client offering
+a PIX curve suite this node was not built for",
+`offered=BabyJubJub ours=secp256k1`).
 
 The Curvy deployment — chain with Blokli, relayer, indexer, batch prover and
 gateway, pinned by hoprd's `localcluster/curvy/release.json` — comes up first,
@@ -257,7 +273,7 @@ What changes in the test is where the money moves:
 A direct shield is the Safe calling the Curvy aggregator through its node
 management module, which forwards only to targets scoped into it. The cluster
 grants that once per Safe — its nodes' and the client's extra identity's — when
-`HOPRD_CURVY_SCOPE_AGGREGATOR` is set, as `up-curvy` does. A Safe without it
+`HOPRD_CURVY_SCOPE_AGGREGATOR` is set, as `up-pix-curvy` does. A Safe without it
 fails its first shield with `NonExistentKey()`.
 
 ## Running the end-to-end browser tests
@@ -522,8 +538,8 @@ meant to be copied onto a machine with a running client.
 | `summary`                  | Print `gnosis_vpn-ctl` usage and component commits/tags (runs as part of `up`) |
 | `network-create`           | Creates `DOCKER_NETWORK` (idempotent; also runs as part of `cluster-start`)    |
 | `network-remove`           | Removes `DOCKER_NETWORK` (runs as part of `clean`)                             |
-| `up-pix`                   | `up` with PIX enabled on the cluster and in the client config — see above      |
-| `up-curvy`                 | `up-pix` settling through a local Curvy deployment — see above                 |
+| `up-pix-test`              | `up` with PIX on the test pool, cluster and client — see above                 |
+| `up-pix-curvy`             | `up-pix-test` settling through a local Curvy deployment                        |
 | `curvy-stack-up`           | Start the Curvy deployment the `curvy` pool settles through                    |
 | `curvy-stack-down`         | Stop it (also part of `down`)                                                  |
 | `system-test-pix`          | Drive a PIX cycle and assert the exit's income — see above                     |
@@ -569,15 +585,16 @@ your host firewall.
 - Exit-node (`gnosis_vpn-server`) containers are unaffected by this change and
   don't join `DOCKER_NETWORK` — the cluster already reaches their published host
   ports directly, as before.
-- `build-cluster` builds `binary-hoprd-pix-test-x86_64-linux` (the `test`
-  pool, `hopr-lib/pix-secp256k1`), or `binary-hoprd-pix-curvy-x86_64-linux`
-  under `CLUSTER_PIX_POOL=curvy`. The curve is a network-wide invariant that
-  nothing negotiates, so an exit refuses every PIX session from a client built
-  for the other one (`UnacceptablePixParams`, logged on the node as "refusing a
-  client offering a PIX curve suite this node was not built for"). Since
-  gnosis_vpn-client #849 the client always builds edgli's default, `pix-curvy`
-  (Baby JubJub), so only `up-curvy` pairs with it for PIX; plain `up` turns PIX
-  off in the client config, where the curve does not matter.
+- `build-cluster` builds `binary-hoprd-pix-test-x86_64-linux` (the `test` pool,
+  `hopr-lib/pix-secp256k1`), or `binary-hoprd-pix-curvy-x86_64-linux` under
+  `CLUSTER_PIX_POOL=curvy`. The curve is a network-wide invariant that nothing
+  negotiates, so an exit refuses every PIX session from a client built for the
+  other one (`UnacceptablePixParams`, logged on the node as "refusing a client
+  offering a PIX curve suite this node was not built for"). gnosis_vpn-client
+  ships on edgli's default, `pix-curvy` (Baby JubJub), and builds `pix-test`
+  only on request (`docker-build-pix-test`), so `up-pix-test` builds that
+  variant and `up-pix-curvy` the shipping one; plain `up` turns PIX off in the
+  client config, where the curve does not matter.
 - The client's post-connect tunnel ping is hardcoded to `10.128.0.1`
   (`ping::Options::default()` in `core::runner::tunnel_ping_loop`) and does not
   read `[connection.ping] address`, which only the connect-time verification
@@ -593,9 +610,9 @@ your host firewall.
 - PIX _settles_ only if the exit also runs the `Pix` strategy, which is opt-in
   and not part of hoprd's default strategy set.
   `hoprd-localcluster --enable-pix` adds it, and its demo geometry caps the
-  accepted per-SSA quota at 1 MiB — well under hopr-lib's default, so
-  the client has to be sized down to match. `up-pix` does both halves:
-  `--enable-pix` on the cluster and `templates/pix-on.toml.tpl` on the client
-  (see "PIX" above). Plain `up` passes neither, so its exits accept PIX sessions
-  (their default quota window covers the client's offer) but never observe the
-  deposits the client makes.
+  accepted per-SSA quota at 1 MiB — well under hopr-lib's default, so the client
+  has to be sized down to match. `up-pix-test` and `up-pix-curvy` do both
+  halves: `--enable-pix` on the cluster and `templates/pix-on.toml.tpl` on the
+  client (see "PIX" above). Plain `up` passes neither, so its exits accept PIX
+  sessions (their default quota window covers the client's offer) but never
+  observe the deposits the client makes.
