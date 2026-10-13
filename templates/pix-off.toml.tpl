@@ -5,7 +5,8 @@
 # data … has no listener"), poisons the session's service gate and closes the tunnel, so no
 # destination ever finishes connecting.
 #
-# `just up-pix` starts a cluster that can settle it and generates the matching client config;
-# `just system-test-pix` then drives a full deposit → recover → sweep cycle and asserts on it.
+# `just up-pix-test` (or `up-pix-curvy`) starts a cluster that can settle it and generates the
+# matching client config; `just system-test-pix` then drives a full deposit → recover → sweep cycle
+# and asserts on it.
 [connection.pix.ping_main]
 enabled = false
