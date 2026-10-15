@@ -1,5 +1,5 @@
-"""Line-based TOML section editing for client-config cells (T11-capability-matrix, T12-balancer-sweep).
-Sections are matched on the exact header line. No table-array support."""
+"""Line-based TOML section editing for client-config cells (T11-capability-matrix, T12-balancer-sweep,
+T33-path-pin-ab). Sections are matched on the exact header line. No table-array support."""
 import re
 import tomllib
 
@@ -21,6 +21,28 @@ def set_section(path, header, *body):
             break
     else:
         lines += ["", *new]
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines))
+
+
+def set_keys(path, header, **kv):
+    """Set keys inside a section, keeping its other keys (or append the section). Values are TOML literals as
+    strings ('1', '0.0', '"16 Mb/s"'). Merged, never appended as a second header: TOML rejects a table declared
+    twice and the client then refuses its config (a VM bench appended a second [connection.path_planner] to a
+    network config that already had one; exit 66)."""
+    with open(path) as fh:
+        lines = fh.read().split("\n")
+    new = [f"{k} = {v}" for k, v in kv.items()]
+    norm = lambda h: h.split("#", 1)[0].replace(" ", "").strip()     # "[a.b]  # note" is the same table as "[a.b]"
+    for a, b in _blocks(lines):
+        if norm(lines[a]) == norm(header):
+            body = [l for l in lines[a + 1:b] if l.split("=", 1)[0].strip() not in kv]
+            while body and not body[-1].strip():
+                body.pop()
+            lines[a:b] = [lines[a], *new, *body, ""]
+            break
+    else:
+        lines += ["", header, *new, ""]
     with open(path, "w") as fh:
         fh.write("\n".join(lines))
 
