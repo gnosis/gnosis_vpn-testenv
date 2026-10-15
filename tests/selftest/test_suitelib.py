@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from suitelib import tomlcfg  # noqa: E402
+from suitelib import planner, tomlcfg  # noqa: E402
 from suitelib.client import count_log_errors, sidecar_mount_issues, telemetry_sum  # noqa: E402
 from suitelib.config import Config, q  # noqa: E402
 from suitelib.verdicts import Checks, RunDir, read_jsonl  # noqa: E402
@@ -216,6 +216,7 @@ def test_t06_check_arm_counts_stalls_over_stall_max(rundir):
     assert last_verdict(rundir)["status"] == "PASS"
 
 
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="node-sampler.py reads per-pid CPU from /proc (Linux only)")
 def test_node_sampler_keeps_empty_slots_positional(tmp_path):
     """An empty pid or url slot keeps its index: node1 is still node1 when node0 has no pid and no url."""
     import os
@@ -303,3 +304,87 @@ def test_netem_count_is_none_when_tc_fails(tmp_path, monkeypatch):
     assert Cluster.netem_status() == (None, "RTNETLINK answers: Operation not permitted")
     fake.write_text("#!/bin/sh\necho 'qdisc noqueue 0: dev lo root refcnt 2'\n")
     assert Cluster.netem_count() == 0
+
+
+def test_tomlcfg_set_keys_merges_into_an_existing_table(tmp_path):
+    # T33-path-pin-ab: a second [connection.path_planner] header makes the client refuse its config (exit 66)
+    import tomllib
+    f = tmp_path / "c.toml"
+    f.write_text("[connection.path_planner]  # the network's own\nmin_paths_anonymity_floor = 3\nreturn_path_exploration = 0.1\n\n[strategy]\nk = 1\n")
+    tomlcfg.set_keys(f, "[connection.path_planner]", max_cached_paths="1", return_path_exploration="0.0")
+    t = f.read_text()
+    assert t.count("connection.path_planner") == 1
+    pp = tomllib.loads(t)["connection"]["path_planner"]
+    assert pp == {"max_cached_paths": 1, "return_path_exploration": 0.0, "min_paths_anonymity_floor": 3}
+    assert tomllib.loads(t)["strategy"]["k"] == 1
+    g = tmp_path / "d.toml"
+    g.write_text("version = 6\n\n[connection]\nprobe_local_addresses = true\n")
+    tomlcfg.set_keys(g, "[connection.path_planner]", max_cached_paths="1")
+    assert tomllib.loads(g.read_text())["connection"] == {"probe_local_addresses": True, "path_planner": {"max_cached_paths": 1}}
+
+
+def _planner_line(path, prob, kind="fill"):
+    return (f"2026-09-24T14:10:00Z DEBUG hopr_transport::path::planner: weighted candidate path kind=\"{kind}\" "
+            f"destination=0xdd hops=1 path=0x{path} -> 0xdd cost=0.12 composite_weight=0.5 sampling_probability={prob}")
+
+
+def test_planner_one_rebuild_of_three_and_the_return_draw():
+    log = [_planner_line(p, "0.3333") for p in ("1a", "2a", "3a")]
+    log.append("x DEBUG hopr_transport::path::planner: drawing return paths from tempered weights count=4 candidates=3")
+    r = planner.candidates(log)
+    assert (r["lines"], r["rebuilds"], r["candidates"], r["forward"], r["return"], r["churn"]) == (3, 1, 3, 3, 3, 3)
+
+
+def test_planner_pinned_with_churn_is_one_candidate():
+    # one path at a time, a different one at each refresh: 1 candidate, churn 4 (distinct paths read it as broken)
+    r = planner.candidates([_planner_line(p, "1.0", "background-refresh") for p in ("1a", "2a", "3a", "4a")])
+    assert (r["candidates"], r["rebuilds"], r["churn"]) == (1, 4, 4)
+
+
+def test_planner_ignores_ansi_and_the_cost_field():
+    log = [_planner_line("1a", "0.5").replace("path=", "\x1b[3mpath\x1b[0m="), _planner_line("2a", "0.5")]
+    r = planner.candidates(log)
+    assert (r["candidates"], r["churn"]) == (2, 2)
+
+
+def test_planner_nothing_logged_is_zero_lines():
+    assert planner.candidates(["INFO something else"])["lines"] == 0
+
+
+def test_t33_arms_need_auto_and_another_arm_each_once():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "regression"))
+    from test_t33_path_pin_ab import parse_arms
+    assert parse_arms(["auto", "pin-planner"]) == ["auto", "pin-planner"]
+    assert parse_arms(["no-explore", "auto", "pin-planner"]) == ["no-explore", "auto", "pin-planner"]
+    for bad in (["auto"], ["pin-planner"], ["auto", "auto"], ["auto", "pin-planner", "pin-planner"], ["auto", "pinned"]):
+        with pytest.raises(ValueError, match="knob ARMS"):
+            parse_arms(bad)
+
+
+def test_t33_sign_test_p():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "regression"))
+    from test_t33_path_pin_ab import sign_test_p
+    assert (sign_test_p(6, 0), sign_test_p(0, 6), sign_test_p(5, 1), sign_test_p(3, 0), sign_test_p(3, 3)) == (0.031, 0.031, 0.219, 0.25, 1.0)
+    assert sign_test_p(0, 0) is None
+
+
+def test_t33_compare_and_report():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "regression"))
+    from test_t33_path_pin_ab import compare, render
+
+    def s(down, up, cands):
+        return {"down": down, "up": up, "complete": 2, "n": 2, "candidates": cands, "churn": cands}
+    got = {"auto": [s(4.0, 3.0, 2), s(4.0, 3.0, 2), None, s(4.0, 3.0, 2), s(4.0, 3.0, 2), s(4.0, 3.0, 2), s(4.0, 3.0, 2)],
+           "pin-planner": [s(5.0, 3.0, 1)] * 7}
+    c = compare(got, ["auto", "pin-planner"])
+    a, p = c["arms"]["auto"], c["arms"]["pin-planner"]
+    assert (a["sessions"], a["failed"], a["candidates"], p["candidates"]) == (6, 1, "2", "1")
+    d, u = p["down_vs_auto"], p["up_vs_auto"]
+    assert (d["ratio_median"], d["change_pct"], d["higher"], d["pairs"], d["p_sign"]) == (1.25, 25.0, 6, 6, 0.031)
+    assert d["reading"].startswith("higher than auto")
+    assert (u["higher"], u["lower"], u["p_sign"], u["reading"]) == (0, 0, None, "no consistent difference")
+    orders = [["auto", "pin-planner"], ["pin-planner", "auto"]] * 3 + [["auto", "pin-planner"]]
+    md = render(c, got, orders, [], "PAIRS=7")
+    assert "| pin-planner | download | 1.25 | +25.0 % | 6 / 0 of 6 | 0.031 |" in md
+    assert "| 3 | auto, pin-planner | failed | 5.00 / 3.00 |" in md
+    assert "Not comparable" in render(c, got, orders, ["PIN DID NOT TAKE: x"], "PAIRS=7")

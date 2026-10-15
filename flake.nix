@@ -60,6 +60,7 @@
                 gettext
                 jq
                 just
+                (python3.withPackages (ps: [ ps.pytest ]))
                 bats
                 opentelemetry-collector
                 victoriametrics
