@@ -89,8 +89,17 @@ docker exec -it gnosis_vpn-client gnosis_vpn-ctl --help
 ```
 
 `gnosis_vpn-ctl` talks to the client's `gnosis_vpn-root` process over
-`/var/run/gnosisvpn.sock` inside the container, so no `--socket-path` flag is
-needed when run this way.
+`/run/gnosisvpn/gnosisvpn.sock` inside the container, so no `--socket-path` flag
+is needed when run this way.
+
+`client-start` places the pre-funded identity in
+`CLIENT_STATE_DIR/.local/share/gnosisvpn/networks/<network>/` (`<network>` is
+Blokli's `chainInfo.network`) and starts the worker as the image's `gnosisvpn`
+user, since root may drive a worker but never own one:
+
+```sh
+docker exec -u gnosisvpn gnosis_vpn-client gnosis_vpn-ctl start-client 30min
+```
 
 ## Running system tests
 
