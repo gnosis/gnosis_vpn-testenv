@@ -89,8 +89,17 @@ docker exec -it gnosis_vpn-client gnosis_vpn-ctl --help
 ```
 
 `gnosis_vpn-ctl` talks to the client's `gnosis_vpn-root` process over
-`/var/run/gnosisvpn.sock` inside the container, so no `--socket-path` flag is
-needed when run this way.
+`/run/gnosisvpn/gnosisvpn.sock` inside the container, so no `--socket-path` flag
+is needed when run this way.
+
+`client-start` places the pre-funded identity in
+`CLIENT_STATE_DIR/.local/share/gnosisvpn/networks/<network>/` (`<network>` is
+Blokli's `chainInfo.network`) and starts the worker as the image's `gnosisvpn`
+user, since root may drive a worker but never own one:
+
+```sh
+docker exec -u gnosisvpn gnosis_vpn-client gnosis_vpn-ctl start-client 30min
+```
 
 ## Running system tests
 
@@ -428,9 +437,9 @@ isn't created or used at all in this mode, which also sidesteps the host
 firewall / P2P reachability issue noted below entirely. This reintroduces the
 routing-loop risk the container was built to avoid (see "Why the client runs in
 its own container" above) if `gnosis_vpn-server` shares the host's egress, and
-requires `CLIENT_WORKER_USER` to already exist as a system account
-(`gnosis_vpn-root` drops privileges to it by uid/gid when spawning the worker —
-its home directory doesn't matter). Don't run this alongside
+requires `CLIENT_WORKER_USER` to already exist with a writable home (it runs
+`start-client`, so the worker runs as it, and its identity is staged at
+`~/.local/share/gnosisvpn/networks/<network>/` there). Don't run this alongside
 `client-start`/`cluster-start` at the same time; they'd fight over
 `CLIENT_STATE_DIR` and the default control socket. (Switching _between_
 `cluster-start`/`cluster-start-on-host`/`cluster-start-on-network` sequentially
@@ -462,19 +471,15 @@ the Docker gateway or loopback. `LAN_IP` is auto-detected from the default route
 
 - An `rsync` command to run _from the other machine_ that pulls
   `CONFIG_DIR/on-network/` from this host over SSH into
-  `/tmp/gnosis_vpn-on-network`, plus a `chmod` to make it world-readable —
-  `gnosis_vpn-worker` reads the identity file as an unprivileged user, so the
-  bundle can't sit under a private home directory.
-- Steps to build the client with `cargo build --release` and copy the resulting
-  `gnosis_vpn-worker` binary into the worker user's home dir, `chown`ed to that
-  user — the worker binary has the same unprivileged-user-can't-reach-it problem
-  as the identity file above, since `target/release` sits under your home dir (a
-  nix build wouldn't need this, its result lives in the world-readable
-  `/nix/store`).
-- The manual `gnosis_vpn-root` invocation to run there
-  (`./target/release/gnosis_vpn-root --worker-binary ${worker_home}/gnosis_vpn-worker --state-home ${worker_home}`),
-  with the identity/config/Blokli-URL/worker-user settings passed as CLI flags,
-  pointing at the pulled bundle.
+  `/tmp/gnosis_vpn-on-network`.
+- The commands that stage the bundled identity at
+  `~/.local/share/gnosisvpn/networks/<network>/` (macOS:
+  `~/Library/Application Support/GnosisVPN/networks/<network>/`), where the
+  worker looks for it.
+- The manual `gnosis_vpn-root` invocation for a `cargo build --release`
+  checkout, then `gnosis_vpn-ctl start-client 30min` as yourself: the worker
+  runs as whoever starts it, so neither the bundle nor the worker binary needs
+  to be world-readable.
 - The ports this host's firewall needs to allow inbound from the other machine —
   the same NixOS-firewall caveat as below applies, just against the LAN
   interface instead of the Docker bridge.

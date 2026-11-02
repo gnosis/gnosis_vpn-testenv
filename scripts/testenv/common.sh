@@ -44,6 +44,32 @@ lan_ip() {
     echo "${detected}"
 }
 
+# Blokli's chainInfo.network: the client keys every identity directory by it and never takes it as config.
+blokli_network() {
+    local blokli_url="${1:?}" network
+    network=$(curl -fsS --max-time 10 "${blokli_url}/graphql" \
+        -H 'content-type: application/json' \
+        -d '{"query":"{ chainInfo { ... on ChainInfo { network } } }"}' |
+        jq -er '.data.chainInfo.network') || die "Error: cannot query chainInfo.network from ${blokli_url}"
+    echo "${network}"
+}
+
+# The worker reads its identity only from its own (Linux) home, so it is written there as that user.
+stage_identity_in_home() {
+    local user="${1:?}" network="${2:?}" id_file="${3:?}" pass_file="${4:?}"
+    local home data_dir net_dir
+    home=$(sudo -H -u "${user}" printenv HOME)
+    sudo -u "${user}" test -w "${home}" ||
+        die "Error: worker user '${user}' has no writable home (${home}); the worker keeps its identity there"
+    data_dir="${home}/.local/share/gnosisvpn"
+    net_dir="${data_dir}/networks/${network}"
+    sudo -u "${user}" mkdir -p "${net_dir}"
+    cat "${id_file}" | sudo -u "${user}" tee "${net_dir}/hopr.id" >/dev/null
+    # the worker reads the pass file verbatim, and config.sh writes it with a trailing newline
+    printf '%s' "$(cat "${pass_file}")" | sudo -u "${user}" tee "${net_dir}/hopr.pass" >/dev/null
+    sudo -u "${user}" chmod -R go-rwx "${data_dir}"
+}
+
 # Bring the Curvy stack's HOPRD_CURVY_* overrides into the environment (the file exports them).
 load_curvy_env() {
     : "${CURVY_STACK_ENV:?}"
