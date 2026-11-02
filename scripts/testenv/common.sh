@@ -54,20 +54,22 @@ blokli_network() {
     echo "${network}"
 }
 
-# The worker reads its identity only from its own (Linux) home, so it is written there as that user.
-stage_identity_in_home() {
-    local user="${1:?}" network="${2:?}" id_file="${3:?}" pass_file="${4:?}"
-    local home data_dir net_dir
-    home=$(sudo -H -u "${user}" printenv HOME)
-    sudo -u "${user}" test -w "${home}" ||
-        die "Error: worker user '${user}' has no writable home (${home}); the worker keeps its identity there"
-    data_dir="${home}/.local/share/gnosisvpn"
-    net_dir="${data_dir}/networks/${network}"
-    sudo -u "${user}" mkdir -p "${net_dir}"
-    cat "${id_file}" | sudo -u "${user}" tee "${net_dir}/hopr.id" >/dev/null
+# The worker runs as the caller and reads its identity from the caller's (Linux) home.
+stage_local_identity() {
+    local network="${1:?}" id_file="${2:?}" pass_file="${3:?}"
+    [ "$(id -u)" -ne 0 ] || die "Error: run as your own user, not root: root may not own the worker"
+    # the reset below deletes per-network state in your real home, so only the throwaway chain qualifies
+    [ "${network}" = "anvil-localhost" ] ||
+        die "Error: Blokli reports network '${network}', expected the localcluster's anvil-localhost"
+    local data_dir="${HOME}/.local/share/gnosisvpn/networks/${network}"
+    # every cluster starts a new chain, so an earlier run's Safe cache points at nothing
+    rm -rf "${data_dir}" "${HOME}/.cache/gnosisvpn/networks/${network}"
+    mkdir -p "${data_dir}"
+    cp "${id_file}" "${data_dir}/hopr.id"
     # the worker reads the pass file verbatim, and config.sh writes it with a trailing newline
-    printf '%s' "$(cat "${pass_file}")" | sudo -u "${user}" tee "${net_dir}/hopr.pass" >/dev/null
-    sudo -u "${user}" chmod -R go-rwx "${data_dir}"
+    printf '%s' "$(cat "${pass_file}")" >"${data_dir}/hopr.pass"
+    chmod 0700 "${data_dir}"
+    chmod 0600 "${data_dir}/hopr.id" "${data_dir}/hopr.pass"
 }
 
 # Bring the Curvy stack's HOPRD_CURVY_* overrides into the environment (the file exports them).
