@@ -27,7 +27,7 @@ just down
 | Mode                                            | What it targets                                               | Who owns the client                                                 |
 | ----------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `just e2e` (default, `--client-mode container`) | the local testenv stack                                       | `just up` — the suite attaches to the `gnosis_vpn-client` container |
-| `just e2e-on-network` (`--client-mode spawn`)   | a real network (rotsee etc)                                   | **the suite** — it starts and stops `gnosis_vpn-root` itself        |
+| `just e2e-on-network` (`--client-mode spawn`)   | a real network (jura-dev etc)                                 | **the suite** — it starts and stops `gnosis_vpn-root` itself        |
 | `just e2e --client-mode host`                   | whatever a client already running on this host is attached to | you, out of band                                                    |
 
 `spawn` mirrors how `system-tests` works: the justfile stages identity/config,
@@ -35,7 +35,7 @@ and the test owns the daemon lifecycle instead of requiring a pre-running one.
 It needs `sudo` (`gnosis_vpn-root` creates the WireGuard interface and edits the
 routing table), exactly as `just system-tests` does.
 
-### Against a real network (rotsee etc)
+### Against a real network (jura-dev etc)
 
 Point it at a client config, an identity, and a Blokli URL; it starts its own
 `gnosis_vpn-root`, runs the tour, and stops it again.
@@ -44,10 +44,10 @@ Point it at a client config, an identity, and a Blokli URL; it starts its own
 sudo -v && \
 E2E_ROOT_BINARY=../gnosis_vpn-client/target/release/gnosis_vpn-root \
 E2E_WORKER_BINARY=../gnosis_vpn-client/target/release/gnosis_vpn-worker \
-E2E_CONFIG=../rotsee.toml \
+E2E_CONFIG=../jura-dev.toml \
 E2E_IDENTITY_FILE="$HOME/.config/gnosisvpn-hopr.id" \
 E2E_IDENTITY_PASS_FILE="$HOME/.config/gnosisvpn-hopr.pass" \
-E2E_BLOKLI_URL=https://blokli.rotsee.hoprnet.link \
+E2E_BLOKLI_URL=https://blokli.jura.dev.gnosisvpn.io \
   nix develop -c just e2e-on-network --quick
 ```
 
@@ -109,7 +109,7 @@ host and reaches `gnosis_vpn-ctl` through `docker exec`, so no socket is
 bind-mounted.
 
 `--client-mode host` instead drives a client running natively on this host
-(`just up-client-on-host`, or a remote network like rotsee) and starts obscura
+(`just up-client-on-host`, or a remote network like jura-dev) and starts obscura
 on the host. That mode needs `node` and `obscura` on `PATH`.
 
 ## What it measures (per destination)

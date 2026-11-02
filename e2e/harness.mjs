@@ -19,7 +19,7 @@ const SPEEDTEST_LABELS = Array.from(
   { length: Math.max(1, +(process.env.SPEEDTEST_RUNS || 2)) },
   (_, i) => `run${i + 1}`,
 );
-// Sampled for the whole exit window. The second entry is the tunnel gateway, which differs per environment (rotsee 10.128.0.1, testenv 10.129.0.1 — the wg peer address from [connection.ping] in the generated client.toml).
+// Sampled for the whole exit window. The second entry is the tunnel gateway, which differs per environment (jura-dev 10.128.0.1, testenv 10.129.0.1 — the wg peer address from [connection.ping] in the generated client.toml).
 const PING_TARGETS = (process.env.PING_TARGETS || "1.1.1.1,10.128.0.1")
   .split(",")
   .map((t) => t.trim())

@@ -326,7 +326,7 @@ e2e *ARGS: build-e2e
 # Needs sudo (WireGuard + routing table) and a pre-existing worker user — macOS has no
 # useradd, so unlike the Linux-only system-tests recipe this does not create one.
 # Full tunnel: while it runs, this machine's traffic egresses through the exit under test.
-# Run the e2e browser suite against a real network (rotsee etc), starting our own client
+# Run the e2e browser suite against a real network (jura-dev etc), starting our own client
 e2e-on-network *ARGS:
     @scripts/testenv/e2e-on-network.sh {{ARGS}}
 
