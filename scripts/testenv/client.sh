@@ -220,6 +220,8 @@ start_on_host() {
 
     # sudo backgrounded can't read TTY; pre-authenticate while still interactive
     sudo -v
+    # the Safe cache outlives the chain it was read from; the worker re-queries it when missing
+    sudo -H -u "${CLIENT_WORKER_USER}" sh -c 'rm -rf "${HOME}/.cache/gnosisvpn/networks/$1"' _ "${network}"
     stage_identity_in_home "${CLIENT_WORKER_USER}" "${network}" \
         "${CONFIG_DIR}/extra_id_0.id" "${CONFIG_DIR}/extra_id_0.password"
 

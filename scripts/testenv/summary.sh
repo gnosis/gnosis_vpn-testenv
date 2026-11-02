@@ -53,8 +53,9 @@ host_client() {
     echo "── Gnosis VPN test stack (client on host) ─────────────────────"
     echo ""
     echo "Control the client:"
-    echo "  ${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl status"
-    echo "  ${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl connect <destination-id>"
+    # the worker belongs to CLIENT_WORKER_USER; only root may drive another user's worker
+    echo "  sudo ${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl status"
+    echo "  sudo ${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl connect <destination-id>"
     echo "  just client-logs-on-host"
     echo ""
     echo "Component versions:"

@@ -29,9 +29,11 @@ fi
 # world-readable /nix/store path rather than one under someone's home directory.
 root_binary=$(readlink -f "${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-root" 2>/dev/null || true)
 worker_binary=$(readlink -f "${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-worker" 2>/dev/null || true)
-if [ ! -x "${root_binary}" ] || [ ! -x "${worker_binary}" ]; then
-    die "Missing client binaries in ${GVPN_CLIENT_DIR}/result/bin — run 'just build-client' first"
-fi
+ctl_binary=$(readlink -f "${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl" 2>/dev/null || true)
+for binary in "${root_binary}" "${worker_binary}" "${ctl_binary}"; do
+    [ -x "${binary}" ] ||
+        die "Missing client binaries in ${GVPN_CLIENT_DIR}/result/bin — run 'just build-client' first"
+done
 
 # Its own flake output — `binary-gnosis_vpn-x86_64-linux` ships root/worker/ctl only.
 nix build -L --out-link "${GVPN_CLIENT_DIR}/result-system-tests" \
@@ -47,6 +49,7 @@ grep -o '^\[destinations\.[^]]*\]' "${CONFIG_DIR}/client.toml" | sed 's/^/  dest
 echo "  config:      ${CONFIG_DIR}/client.toml"
 echo "  root:        ${root_binary}"
 echo "  worker:      ${worker_binary}"
+echo "  ctl:         ${ctl_binary}"
 echo "  runner:      $(readlink -f "${test_binary}")"
 echo "  worker user: ${SYSTEM_TEST_WORKER_USER}"
 echo "  state home:  ${SYSTEM_TEST_STATE_DIR}"
@@ -80,6 +83,7 @@ stage_identity_in_home "${SYSTEM_TEST_WORKER_USER}" "$(blokli_network "${blokli_
 # restated here as an assignment on the command line.
 sudo \
     CARGO_BIN_EXE_GNOSIS_VPN_ROOT="${root_binary}" \
+    CARGO_BIN_EXE_GNOSIS_VPN_CTL="${ctl_binary}" \
     GNOSISVPN_CONFIG_PATH="${CONFIG_DIR}/client.toml" \
     GNOSISVPN_WORKER_BINARY="${worker_binary}" \
     SYSTEM_TEST_WORKER_USER="${SYSTEM_TEST_WORKER_USER}" \

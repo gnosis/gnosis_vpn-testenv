@@ -132,10 +132,12 @@ ctl() {
 
 ctl_json() { ctl -o json "$@" 2>/dev/null; }
 
-# Root may drive anyone's worker but never own one: in spawn mode WORKER_USER starts it.
+# Root may drive anyone's worker but never own one: the container's gnosisvpn or WORKER_USER starts it.
 start_client() { # start_client <keep-alive>
-    if [ "$CLIENT_MODE" != "spawn" ]; then
+    if [ "$CLIENT_MODE" = "host" ]; then
         ctl start-client "$1"
+    elif [ "$CLIENT_MODE" = "container" ]; then
+        docker exec -u gnosisvpn "$CLIENT_CONTAINER" gnosis_vpn-ctl start-client "$1"
     elif [ -n "$SOCKET_PATH" ]; then
         sudo -n -u "$WORKER_USER" "$GVPN_CTL" -s "$SOCKET_PATH" start-client "$1"
     else
