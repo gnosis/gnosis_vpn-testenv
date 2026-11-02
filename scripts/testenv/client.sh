@@ -196,7 +196,6 @@ stop() {
 start_on_host() {
     : "${CONFIG_DIR:?}"
     : "${GVPN_CLIENT_DIR:?}"
-    : "${CLIENT_WORKER_USER:?}"
     : "${CLIENT_LOG_LEVEL:?}"
     : "${CLIENT_LOG_FILE:?}"
     local root_bin="${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-root"
@@ -205,11 +204,6 @@ start_on_host() {
         die "Error: gnosis_vpn-client binaries not found at ${GVPN_CLIENT_DIR}/result/bin/" \
             "Run 'just build-client-native' to build them first"
     fi
-    id "${CLIENT_WORKER_USER}" >/dev/null 2>&1 || die \
-        "Error: worker user '${CLIENT_WORKER_USER}' not found on this host." \
-        "The worker runs as whoever calls 'gnosis_vpn-ctl start-client', and root may not own it," \
-        "so this user must already exist with a writable home, where its identity is staged (create" \
-        "one via your NixOS config, or override the name via CLIENT_WORKER_USER)."
     if pgrep -f gnosis_vpn-root >/dev/null 2>&1; then
         echo "Client already running on host — skipping start"
         return 0
@@ -220,10 +214,7 @@ start_on_host() {
 
     # sudo backgrounded can't read TTY; pre-authenticate while still interactive
     sudo -v
-    # the Safe cache outlives the chain it was read from; the worker re-queries it when missing
-    sudo -H -u "${CLIENT_WORKER_USER}" sh -c 'rm -rf "${HOME}/.cache/gnosisvpn/networks/$1"' _ "${network}"
-    stage_identity_in_home "${CLIENT_WORKER_USER}" "${network}" \
-        "${CONFIG_DIR}/extra_id_0.id" "${CONFIG_DIR}/extra_id_0.password"
+    stage_local_identity "${network}" "${CONFIG_DIR}/extra_id_0.id" "${CONFIG_DIR}/extra_id_0.password"
 
     sudo RUST_LOG="${CLIENT_LOG_LEVEL}" \
         GNOSISVPN_CONFIG_PATH="${CONFIG_DIR}/client.toml" \
@@ -231,7 +222,7 @@ start_on_host() {
         GNOSISVPN_LOG_FILE="${CLIENT_LOG_FILE}" \
         "${root_bin}" --worker-binary "${worker_bin}" &
     echo "Client PID: $!"
-    start_worker sudo -u "${CLIENT_WORKER_USER}" "${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl" start-client 30min
+    start_worker "${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl" start-client 30min
 }
 
 # Cascades SIGTERM to the worker via gnosis_vpn-root.

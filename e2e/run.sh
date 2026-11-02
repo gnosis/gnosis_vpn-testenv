@@ -29,7 +29,6 @@ GVPN_IDENTITY_FILE="${GVPN_IDENTITY_FILE:-}"
 GVPN_IDENTITY_PASS="${GVPN_IDENTITY_PASS:-}"
 GVPN_IDENTITY_SAFE="${GVPN_IDENTITY_SAFE:-}"
 GVPN_BLOKLI_URL="${GVPN_BLOKLI_URL:-}"
-WORKER_USER="${WORKER_USER:-gnosisvpn-dev}"
 SPAWN_LOG="${SPAWN_LOG:-/tmp/gnosis_vpn-e2e-daemon.log}"
 SPAWN_READY_TRIES="${SPAWN_READY_TRIES:-150}" # x2s; a real network takes longer to reach Running than a localcluster
 SPAWNED_DAEMON=0
@@ -112,15 +111,7 @@ fi
 ctl() {
     case "$CLIENT_MODE" in
     container) docker exec "$CLIENT_CONTAINER" gnosis_vpn-ctl "$@" ;;
-    # spawn: the worker belongs to WORKER_USER, so the suite talks to it as root
-    spawn)
-        if [ -n "$SOCKET_PATH" ]; then
-            sudo -n "$GVPN_CTL" -s "$SOCKET_PATH" "$@"
-        else
-            sudo -n "$GVPN_CTL" "$@"
-        fi
-        ;;
-    host)
+    host | spawn)
         if [ -n "$SOCKET_PATH" ]; then
             "$GVPN_CTL" -s "$SOCKET_PATH" "$@"
         else
@@ -132,17 +123,22 @@ ctl() {
 
 ctl_json() { ctl -o json "$@" 2>/dev/null; }
 
-# Root may drive anyone's worker but never own one: the container's gnosisvpn or WORKER_USER starts it.
+# Root may drive anyone's worker but never own one: in the container its gnosisvpn user starts it.
 start_client() { # start_client <keep-alive>
-    if [ "$CLIENT_MODE" = "host" ]; then
-        ctl start-client "$1"
-    elif [ "$CLIENT_MODE" = "container" ]; then
+    if [ "$CLIENT_MODE" = "container" ]; then
         docker exec -u gnosisvpn "$CLIENT_CONTAINER" gnosis_vpn-ctl start-client "$1"
-    elif [ -n "$SOCKET_PATH" ]; then
-        sudo -n -u "$WORKER_USER" "$GVPN_CTL" -s "$SOCKET_PATH" start-client "$1"
     else
-        sudo -n -u "$WORKER_USER" "$GVPN_CTL" start-client "$1"
+        ctl start-client "$1"
     fi
+}
+
+# place_file <src> <dest> -> never replaces a different file: this is your own home, maybe your real identity.
+place_file() {
+    if [ -e "$2" ] && ! cmp -s "$1" "$2"; then
+        echo "$2 already exists and differs from $1; move it away first" >&2
+        exit 2
+    fi
+    cp "$1" "$2"
 }
 
 is_connected_to() { # is_connected_to <id>
@@ -203,11 +199,9 @@ else
         echo "missing $GVPN_CTL (set GVPN_CTL)" >&2
         exit 2
     }
-    # sudo resets PATH, and spawn mode runs ctl through sudo
-    GVPN_CTL=$(command -v "$GVPN_CTL")
 fi
 
-# spawn_daemon -> starts gnosis_vpn-root under sudo, the worker as WORKER_USER, and waits for Running.
+# spawn_daemon -> starts gnosis_vpn-root under sudo, the worker as you, and waits for Running.
 # gnosis_vpn-root needs root for the WireGuard interface and routing table, exactly as
 # gnosis_vpn-system_tests does; sudo -v first so a long run does not hit a prompt later.
 spawn_daemon() {
@@ -219,10 +213,10 @@ spawn_daemon() {
         echo "--client-mode spawn needs:$missing" >&2
         exit 2
     fi
-    id "$WORKER_USER" >/dev/null 2>&1 || {
-        echo "worker user '$WORKER_USER' does not exist (set WORKER_USER); it owns the worker and holds its identity" >&2
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "run as your own user, not root: root may not own the worker" >&2
         exit 2
-    }
+    fi
 
     sudo -v
     # A tour outlives sudo's 5-minute timestamp, so teardown would re-prompt for a password
@@ -233,8 +227,8 @@ spawn_daemon() {
     done) &
     SUDO_KEEPALIVE_PID=$!
 
-    # The worker reads its identity and Safe cache only from its own home, per network.
-    local network home data_dir cache_dir
+    # The worker reads its identity and Safe cache only from your home, per network.
+    local network data_dir cache_dir pass_file
     network=$(curl -fsS --max-time 10 "${GVPN_BLOKLI_URL%/}/graphql" \
         -H 'content-type: application/json' \
         -d '{"query":"{ chainInfo { ... on ChainInfo { network } } }"}' |
@@ -242,22 +236,25 @@ spawn_daemon() {
         echo "cannot query chainInfo.network from $GVPN_BLOKLI_URL" >&2
         exit 2
     }
-    home=$(sudo -H -u "$WORKER_USER" printenv HOME)
     if [ "$(uname)" = "Darwin" ]; then
-        data_dir="$home/Library/Application Support/GnosisVPN/networks/$network"
-        cache_dir="$home/Library/Caches/GnosisVPN/networks/$network"
+        data_dir="$HOME/Library/Application Support/GnosisVPN/networks/$network"
+        cache_dir="$HOME/Library/Caches/GnosisVPN/networks/$network"
     else
-        data_dir="$home/.local/share/gnosisvpn/networks/$network"
-        cache_dir="$home/.cache/gnosisvpn/networks/$network"
+        data_dir="$HOME/.local/share/gnosisvpn/networks/$network"
+        cache_dir="$HOME/.cache/gnosisvpn/networks/$network"
     fi
-    sudo -u "$WORKER_USER" mkdir -p "$data_dir" "$cache_dir"
-    cat "$GVPN_IDENTITY_FILE" | sudo -u "$WORKER_USER" tee "$data_dir/hopr.id" >/dev/null
-    printf %s "$GVPN_IDENTITY_PASS" | sudo -u "$WORKER_USER" tee "$data_dir/hopr.pass" >/dev/null
+    mkdir -p "$data_dir" "$cache_dir"
+    chmod 0700 "$data_dir"
+    place_file "$GVPN_IDENTITY_FILE" "$data_dir/hopr.id"
+    pass_file=$(mktemp)
+    printf %s "$GVPN_IDENTITY_PASS" >"$pass_file"
+    place_file "$pass_file" "$data_dir/hopr.pass"
+    rm -f "$pass_file"
     # without the .safe the client onboards a new, unfunded Safe and sits in PreparingSafe forever
-    [ -n "$GVPN_IDENTITY_SAFE" ] && cat "$GVPN_IDENTITY_SAFE" | sudo -u "$WORKER_USER" tee "$cache_dir/hopr.safe" >/dev/null
-    sudo -u "$WORKER_USER" chmod 0600 "$data_dir/hopr.id" "$data_dir/hopr.pass"
+    [ -n "$GVPN_IDENTITY_SAFE" ] && place_file "$GVPN_IDENTITY_SAFE" "$cache_dir/hopr.safe"
+    chmod 0600 "$data_dir/hopr.id" "$data_dir/hopr.pass"
 
-    echo "-- spawning gnosis_vpn-root (worker user $WORKER_USER, log $SPAWN_LOG)"
+    echo "-- spawning gnosis_vpn-root (log $SPAWN_LOG)"
     sudo RUST_LOG="${DAEMON_LOG_LEVEL:-info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug}" \
         "$GVPN_ROOT_BIN" \
         --config-path "$GVPN_CONFIG" \
@@ -272,7 +269,7 @@ spawn_daemon() {
     until start_client 4h >/dev/null 2>&1; do
         i=$((i + 1))
         if [ "$i" -ge "$SPAWN_READY_TRIES" ]; then
-            echo "start-client as $WORKER_USER kept failing for $((SPAWN_READY_TRIES * 2))s (see $SPAWN_LOG)" >&2
+            echo "start-client kept failing for $((SPAWN_READY_TRIES * 2))s (see $SPAWN_LOG)" >&2
             exit 2
         fi
         sleep 2
