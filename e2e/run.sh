@@ -251,8 +251,7 @@ spawn_daemon() {
     sudo -u "$WORKER_USER" mkdir -p "$data_dir" "$cache_dir"
     cat "$GVPN_IDENTITY_FILE" | sudo -u "$WORKER_USER" tee "$data_dir/hopr.id" >/dev/null
     printf %s "$GVPN_IDENTITY_PASS" | sudo -u "$WORKER_USER" tee "$data_dir/hopr.pass" >/dev/null
-    # Without the .safe the client cannot find its existing safe association and onboards a brand
-    # new (unfunded) one instead — run_mode sits in PreparingSafe forever.
+    # without the .safe the client onboards a new, unfunded Safe and sits in PreparingSafe forever
     [ -n "$GVPN_IDENTITY_SAFE" ] && cat "$GVPN_IDENTITY_SAFE" | sudo -u "$WORKER_USER" tee "$cache_dir/hopr.safe" >/dev/null
     sudo -u "$WORKER_USER" chmod 0600 "$data_dir/hopr.id" "$data_dir/hopr.pass"
 
