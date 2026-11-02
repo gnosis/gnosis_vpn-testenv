@@ -6,16 +6,6 @@ source "${HERE}/common.sh"
 
 : "${CLIENT_STATE_DIR:?}"
 
-# Blokli's chainInfo.network: the client keys every identity directory by it and never takes it as config.
-blokli_network() {
-    local blokli_url="${1:?}" network
-    network=$(curl -fsS --max-time 10 "${blokli_url}/graphql" \
-        -H 'content-type: application/json' \
-        -d '{"query":"{ chainInfo { ... on ChainInfo { network } } }"}' |
-        jq -er '.data.chainInfo.network') || die "Error: cannot query chainInfo.network from ${blokli_url}"
-    echo "${network}"
-}
-
 # Put extra identity <extra_index> where the worker looks for it: <data_dir>/networks/<network>/hopr.{id,pass}.
 stage_identity() {
     local data_dir="${1:?}" network="${2:?}" extra_index="${3:?}"
@@ -218,7 +208,7 @@ start_on_host() {
     id "${CLIENT_WORKER_USER}" >/dev/null 2>&1 || die \
         "Error: worker user '${CLIENT_WORKER_USER}' not found on this host." \
         "The worker runs as whoever calls 'gnosis_vpn-ctl start-client', and root may not own it," \
-        "so this user must already exist as a system account (its home directory is irrelevant — create" \
+        "so this user must already exist with a writable home, where its identity is staged (create" \
         "one via your NixOS config, or override the name via CLIENT_WORKER_USER)."
     if pgrep -f gnosis_vpn-root >/dev/null 2>&1; then
         echo "Client already running on host — skipping start"
@@ -230,16 +220,12 @@ start_on_host() {
 
     # sudo backgrounded can't read TTY; pre-authenticate while still interactive
     sudo -v
-    # GNOSISVPN_HOME replaces the worker user's home, which root never creates or chowns: hand it over here
-    mkdir -p "${CLIENT_STATE_DIR}"
-    sudo chown -R "$(id -u):$(id -g)" "${CLIENT_STATE_DIR}"
-    stage_identity "${CLIENT_STATE_DIR}" "${network}" 0
-    sudo chown -R "${CLIENT_WORKER_USER}:" "${CLIENT_STATE_DIR}"
+    stage_identity_in_home "${CLIENT_WORKER_USER}" "${network}" \
+        "${CONFIG_DIR}/extra_id_0.id" "${CONFIG_DIR}/extra_id_0.password"
 
     sudo RUST_LOG="${CLIENT_LOG_LEVEL}" \
         GNOSISVPN_CONFIG_PATH="${CONFIG_DIR}/client.toml" \
         GNOSISVPN_HOPR_BLOKLI_URL="${blokli_url}" \
-        GNOSISVPN_HOME="${CLIENT_STATE_DIR}" \
         GNOSISVPN_LOG_FILE="${CLIENT_LOG_FILE}" \
         "${root_bin}" --worker-binary "${worker_bin}" &
     echo "Client PID: $!"

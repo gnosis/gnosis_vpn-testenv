@@ -60,7 +60,7 @@ E2E_BLOKLI_URL=https://blokli.rotsee.hoprnet.link \
 | `E2E_IDENTITY_PASS_FILE` | yes      | file containing that identity's password (a file, not the password itself, so it stays out of shell history) |
 | `E2E_IDENTITY_SAFE_FILE` | no       | defaults to the `.safe` sitting next to the identity                                                         |
 | `E2E_BLOKLI_URL`         | yes      | Blokli endpoint for the network                                                                              |
-| `E2E_WORKER_USER`        | no       | unprivileged user the worker runs as (default `gnosisvpn-dev`)                                               |
+| `E2E_WORKER_USER`        | no       | unprivileged user that owns the worker and holds its identity (default `gnosisvpn-dev`)                      |
 | `E2E_STAGE_DIR`          | no       | where inputs are staged (default `/tmp/gnosis_vpn-e2e-stage`)                                                |
 
 **Reuse your existing safe.** The `.safe` file must accompany the identity —
@@ -76,7 +76,9 @@ defines shows up via `gnosis_vpn-ctl status`. Add `--destination USA`
 the routing table, exactly as `just system-tests` does. The suite keeps the sudo
 timestamp alive so a long tour does not re-prompt at teardown.
 
-`E2E_WORKER_USER` must already exist; `gnosis_vpn-root` drops privileges to it.
+`E2E_WORKER_USER` must already exist with a writable home: the suite stages the
+identity there, starts the worker with `start-client` as that user, and drives
+it through `sudo gnosis_vpn-ctl` (root may use anyone's worker, never own one).
 macOS has no `useradd`, so unlike the Linux-only `system-tests` recipe this does
 not create the account.
 

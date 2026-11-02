@@ -39,7 +39,6 @@ nix build -L --out-link "${GVPN_CLIENT_DIR}/result-system-tests" \
 test_binary="${GVPN_CLIENT_DIR}/result-system-tests/bin/gnosis_vpn-system_tests"
 
 blokli_url=$(cat "${CONFIG_DIR}/blokli_url")
-identity_pass=$(cat "${CONFIG_DIR}/extra_id.password")
 
 # Name the resolved target up front, so a failed run does not need this script to explain itself
 echo "=== system test target ==="
@@ -57,11 +56,16 @@ echo "=========================="
 sudo -v
 
 if ! getent passwd "${SYSTEM_TEST_WORKER_USER}" >/dev/null 2>&1; then
-    # No home of its own: the state directory is handed over explicitly via GNOSISVPN_HOME below.
+    # Its home is the state directory below, which is created fresh on every run.
     sudo useradd --system --user-group --no-create-home \
         --home-dir "${SYSTEM_TEST_STATE_DIR}" "${SYSTEM_TEST_WORKER_USER}"
     echo "Created system user ${SYSTEM_TEST_WORKER_USER}"
 fi
+# The worker keeps its state in its own home, and this run wipes that home: never someone else's.
+worker_home=$(getent passwd "${SYSTEM_TEST_WORKER_USER}" | cut -d: -f6)
+[ "${worker_home}" = "${SYSTEM_TEST_STATE_DIR}" ] ||
+    die "Worker user ${SYSTEM_TEST_WORKER_USER} has home ${worker_home}, not ${SYSTEM_TEST_STATE_DIR}." \
+        "Pick a dedicated user via SYSTEM_TEST_WORKER_USER."
 
 # `cluster-stop` wipes DATA_DIR and the chain container, so every cluster comes up with a new chain:
 # a state home from an earlier run caches a Safe address that no longer exists on it. Wiped rather
@@ -69,16 +73,15 @@ fi
 sudo rm -rf "${SYSTEM_TEST_STATE_DIR}"
 sudo mkdir -p "${SYSTEM_TEST_STATE_DIR}"
 sudo chown "${SYSTEM_TEST_WORKER_USER}:${SYSTEM_TEST_WORKER_USER}" "${SYSTEM_TEST_STATE_DIR}"
+stage_identity_in_home "${SYSTEM_TEST_WORKER_USER}" "$(blokli_network "${blokli_url}")" \
+    "${CONFIG_DIR}/extra_id.id" "${CONFIG_DIR}/extra_id.password"
 
 # sudo's env_reset drops the environment, so every variable the spawned gnosis_vpn-root needs is
 # restated here as an assignment on the command line.
 sudo \
     CARGO_BIN_EXE_GNOSIS_VPN_ROOT="${root_binary}" \
     GNOSISVPN_CONFIG_PATH="${CONFIG_DIR}/client.toml" \
-    GNOSISVPN_HOME="${SYSTEM_TEST_STATE_DIR}" \
-    GNOSISVPN_WORKER_USER="${SYSTEM_TEST_WORKER_USER}" \
     GNOSISVPN_WORKER_BINARY="${worker_binary}" \
-    GNOSISVPN_HOPR_IDENTITY_FILE="${CONFIG_DIR}/extra_id.id" \
-    GNOSISVPN_HOPR_IDENTITY_PASS="${identity_pass}" \
+    SYSTEM_TEST_WORKER_USER="${SYSTEM_TEST_WORKER_USER}" \
     RUST_LOG="${SYSTEM_TEST_LOG_LEVEL}" \
     "${test_binary}" --blokliUrl "${blokli_url}" "$@"

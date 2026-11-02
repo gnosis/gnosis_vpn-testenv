@@ -117,7 +117,7 @@ CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 # Persistent worker state (identity keys, cache) bind-mounted into the client container
 CLIENT_STATE_DIR := env_var_or_default("CLIENT_STATE_DIR", "/tmp/gnosis_vpn-testenv-state")
 
-# OS user gnosis_vpn-root drops privileges to when spawning gnosis_vpn-worker (host-native client only; must already exist)
+# OS user that starts and owns gnosis_vpn-worker (host-native client only; must already exist with a writable home)
 CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpntestenv")
 
 # Client log file path (host-native client only — the container relies on `docker logs` instead)
