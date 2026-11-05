@@ -6,6 +6,27 @@ source "${HERE}/common.sh"
 
 : "${CLIENT_STATE_DIR:?}"
 
+# Put extra identity <extra_index> where the worker looks for it: <data_dir>/networks/<network>/hopr.{id,pass}.
+stage_identity() {
+    local data_dir="${1:?}" network="${2:?}" extra_index="${3:?}"
+    local net_dir="${data_dir}/networks/${network}"
+    mkdir -p "${net_dir}"
+    cp "${CONFIG_DIR}/extra_id_${extra_index}.id" "${net_dir}/hopr.id"
+    # the worker reads the pass file verbatim, and config.sh writes it with a trailing newline
+    printf '%s' "$(cat "${CONFIG_DIR}/extra_id_${extra_index}.password")" >"${net_dir}/hopr.pass"
+    chmod 0600 "${net_dir}/hopr.id" "${net_dir}/hopr.pass"
+    chmod -R go-rwx "${data_dir}"
+}
+
+# Only a non-root `start-client` spawns the worker; root's socket answers once it has queried blokli.
+start_worker() {
+    for _ in $(seq 1 30); do
+        "$@" && return 0
+        sleep 1
+    done
+    die "Error: '$*' kept failing for 30 s"
+}
+
 # Start one client container: start [name [state_dir [extra_index]]]. Defaults are the primary client
 # (gnosis_vpn-client, CLIENT_STATE_DIR, extra identity 0). Also starts the client's tools sidecar.
 start() {
@@ -33,12 +54,12 @@ start() {
     done
     mkdir -p "${state_dir}" "${SUITE_OUT_DIR}"
 
-    local blokli_url extra_id_pass running
+    local blokli_url network running
     blokli_url=$(sed 's/localhost/host.docker.internal/' "${CONFIG_DIR}/blokli_url")
-    extra_id_pass=$(cat "${CONFIG_DIR}/extra_id_${extra_index}.password")
-    # the identity lives in the writable state dir: a newer client migrates an older keystore format in
-    # place, which fails on the read-only /config mount ("Read-only file system", worker exit 71)
-    cp "${CONFIG_DIR}/extra_id_${extra_index}.id" "${state_dir}/identity.id"
+    network=$(blokli_network "$(cat "${CONFIG_DIR}/blokli_url")")
+    # state_dir is the image's gnosisvpn home; its entrypoint chowns it, so only the modes are set here
+    stage_identity "${state_dir}/.local/share/gnosisvpn" "${network}" "${extra_index}"
+    chmod -R go-rwx "${state_dir}/.local"
 
     local extra_env=()
     # shellcheck disable=SC2086  # intentional word-splitting of the "K=V K=V" list
@@ -73,10 +94,6 @@ start() {
         --env RUST_LOG="${CLIENT_LOG_LEVEL}" \
         --env GNOSISVPN_CONFIG_PATH=/config/client.toml \
         --env GNOSISVPN_HOPR_BLOKLI_URL="${blokli_url}" \
-        --env GNOSISVPN_HOPR_IDENTITY_FILE=/var/lib/gnosisvpn/identity.id \
-        --env GNOSISVPN_HOPR_IDENTITY_PASS="${extra_id_pass}" \
-        --env GNOSISVPN_HOME=/var/lib/gnosisvpn \
-        --env GNOSISVPN_CLIENT_AUTOSTART="${CLIENT_AUTOSTART}" \
         "${extra_env[@]}" \
         --volume "${CONFIG_DIR}:/config:ro" \
         --volume "${state_dir}:/var/lib/gnosisvpn" \
@@ -89,7 +106,9 @@ start() {
         { docker logs "${name}" 2>&1 || true; } >&2
         exit 1
     fi
-    echo "Started ${name} (${CLIENT_IMAGE}, identity extra_id_${extra_index})"
+    # CLIENT_AUTOSTART is the worker's idle-shutdown duration
+    start_worker docker exec -u gnosisvpn "${name}" gnosis_vpn-ctl start-client "${CLIENT_AUTOSTART}"
+    echo "Started ${name} (${CLIENT_IMAGE}, identity extra_id_${extra_index}, network ${network})"
     tools_start "${name}"
 }
 
@@ -177,7 +196,6 @@ stop() {
 start_on_host() {
     : "${CONFIG_DIR:?}"
     : "${GVPN_CLIENT_DIR:?}"
-    : "${CLIENT_WORKER_USER:?}"
     : "${CLIENT_LOG_LEVEL:?}"
     : "${CLIENT_LOG_FILE:?}"
     local root_bin="${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-root"
@@ -186,34 +204,25 @@ start_on_host() {
         die "Error: gnosis_vpn-client binaries not found at ${GVPN_CLIENT_DIR}/result/bin/" \
             "Run 'just build-client-native' to build them first"
     fi
-    id "${CLIENT_WORKER_USER}" >/dev/null 2>&1 || die \
-        "Error: worker user '${CLIENT_WORKER_USER}' not found on this host." \
-        "gnosis_vpn-root drops privileges to this user (by uid/gid) when spawning gnosis_vpn-worker," \
-        "so it must already exist as a system account (its home directory is irrelevant — create" \
-        "one via your NixOS config, or override the name via CLIENT_WORKER_USER)."
     if pgrep -f gnosis_vpn-root >/dev/null 2>&1; then
         echo "Client already running on host — skipping start"
         return 0
     fi
-    mkdir -p "${CLIENT_STATE_DIR}"
-
-    local blokli_url extra_id_pass
+    local blokli_url network
     blokli_url=$(cat "${CONFIG_DIR}/blokli_url")
-    extra_id_pass=$(cat "${CONFIG_DIR}/extra_id.password")
+    network=$(blokli_network "${blokli_url}")
 
     # sudo backgrounded can't read TTY; pre-authenticate while still interactive
     sudo -v
+    stage_local_identity "${network}" "${CONFIG_DIR}/extra_id_0.id" "${CONFIG_DIR}/extra_id_0.password"
+
     sudo RUST_LOG="${CLIENT_LOG_LEVEL}" \
         GNOSISVPN_CONFIG_PATH="${CONFIG_DIR}/client.toml" \
         GNOSISVPN_HOPR_BLOKLI_URL="${blokli_url}" \
-        GNOSISVPN_HOPR_IDENTITY_FILE="${CONFIG_DIR}/extra_id.id" \
-        GNOSISVPN_HOPR_IDENTITY_PASS="${extra_id_pass}" \
-        GNOSISVPN_HOME="${CLIENT_STATE_DIR}" \
-        GNOSISVPN_CLIENT_AUTOSTART=30min \
-        GNOSISVPN_WORKER_USER="${CLIENT_WORKER_USER}" \
         GNOSISVPN_LOG_FILE="${CLIENT_LOG_FILE}" \
         "${root_bin}" --worker-binary "${worker_bin}" &
     echo "Client PID: $!"
+    start_worker "${GVPN_CLIENT_DIR}/result/bin/gnosis_vpn-ctl" start-client 30min
 }
 
 # Cascades SIGTERM to the worker via gnosis_vpn-root.

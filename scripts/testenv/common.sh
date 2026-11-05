@@ -44,6 +44,34 @@ lan_ip() {
     echo "${detected}"
 }
 
+# Blokli's chainInfo.network: the client keys every identity directory by it and never takes it as config.
+blokli_network() {
+    local blokli_url="${1:?}" network
+    network=$(curl -fsS --max-time 10 "${blokli_url}/graphql" \
+        -H 'content-type: application/json' \
+        -d '{"query":"{ chainInfo { ... on ChainInfo { network } } }"}' |
+        jq -er '.data.chainInfo.network') || die "Error: cannot query chainInfo.network from ${blokli_url}"
+    echo "${network}"
+}
+
+# The worker runs as the caller and reads its identity from the caller's (Linux) home.
+stage_local_identity() {
+    local network="${1:?}" id_file="${2:?}" pass_file="${3:?}"
+    [ "$(id -u)" -ne 0 ] || die "Error: run as your own user, not root: root may not own the worker"
+    # the reset below deletes per-network state in your real home, so only the throwaway chain qualifies
+    [ "${network}" = "anvil-localhost" ] ||
+        die "Error: Blokli reports network '${network}', expected the localcluster's anvil-localhost"
+    local data_dir="${HOME}/.local/share/gnosisvpn/networks/${network}"
+    # every cluster starts a new chain, so an earlier run's Safe cache points at nothing
+    rm -rf "${data_dir}" "${HOME}/.cache/gnosisvpn/networks/${network}"
+    mkdir -p "${data_dir}"
+    cp "${id_file}" "${data_dir}/hopr.id"
+    # the worker reads the pass file verbatim, and config.sh writes it with a trailing newline
+    printf '%s' "$(cat "${pass_file}")" >"${data_dir}/hopr.pass"
+    chmod 0700 "${data_dir}"
+    chmod 0600 "${data_dir}/hopr.id" "${data_dir}/hopr.pass"
+}
+
 # Bring the Curvy stack's HOPRD_CURVY_* overrides into the environment (the file exports them).
 load_curvy_env() {
     : "${CURVY_STACK_ENV:?}"

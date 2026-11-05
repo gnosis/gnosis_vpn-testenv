@@ -117,9 +117,6 @@ CLUSTER_LOG_LEVEL := env_var_or_default("CLUSTER_LOG_LEVEL", "info")
 # Persistent worker state (identity keys, cache) bind-mounted into the client container
 CLIENT_STATE_DIR := env_var_or_default("CLIENT_STATE_DIR", "/tmp/gnosis_vpn-testenv-state")
 
-# OS user gnosis_vpn-root drops privileges to when spawning gnosis_vpn-worker (host-native client only; must already exist)
-CLIENT_WORKER_USER := env_var_or_default("CLIENT_WORKER_USER", "gnosisvpntestenv")
-
 # Client log file path (host-native client only — the container relies on `docker logs` instead)
 CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client.log")
 
@@ -127,10 +124,7 @@ CLIENT_LOG_FILE := env_var_or_default("CLIENT_LOG_FILE", "/tmp/gnosis_vpn-client
 E2E_IMAGE   := env_var_or_default("E2E_IMAGE",   "gnosis_vpn-e2e")
 E2E_OUT_DIR := env_var_or_default("E2E_OUT_DIR", "/tmp/gnosis_vpn-testenv-e2e")
 
-# System-test run: worker user (created by the recipe if missing), its state home (wiped per run),
-# and the runner's RUST_LOG
-SYSTEM_TEST_WORKER_USER := env_var_or_default("SYSTEM_TEST_WORKER_USER", "gnosisvpn")
-SYSTEM_TEST_STATE_DIR   := env_var_or_default("SYSTEM_TEST_STATE_DIR",   "/tmp/gnosis_vpn-testenv-system-tests")
+# System-test run: the runner's RUST_LOG; the worker runs as you
 SYSTEM_TEST_LOG_LEVEL   := env_var_or_default("SYSTEM_TEST_LOG_LEVEL",   "info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug,gnosis_vpn_worker=debug")
 
 # Generated config output dir
@@ -323,8 +317,7 @@ e2e *ARGS: build-e2e
     @e2e/run.sh {{ARGS}}
 
 # Mirrors how `system-tests` owns its daemon instead of attaching to a pre-running one.
-# Needs sudo (WireGuard + routing table) and a pre-existing worker user — macOS has no
-# useradd, so unlike the Linux-only system-tests recipe this does not create one.
+# Needs sudo (WireGuard + routing table); the worker runs as you.
 # Full tunnel: while it runs, this machine's traffic egresses through the exit under test.
 # Run the e2e browser suite against a real network (jura-dev etc), starting our own client
 e2e-on-network *ARGS:
