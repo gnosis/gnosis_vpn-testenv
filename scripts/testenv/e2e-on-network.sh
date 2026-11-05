@@ -10,10 +10,10 @@ source "${HERE}/common.sh"
 : "${E2E_OUT_DIR:?}"
 : "${E2E_ROOT_BINARY:?E2E_ROOT_BINARY must point at a gnosis_vpn-root binary for this host}"
 : "${E2E_WORKER_BINARY:?E2E_WORKER_BINARY must point at a gnosis_vpn-worker binary for this host}"
-: "${E2E_CONFIG:?E2E_CONFIG must point at a client config (e.g. rotsee.toml)}"
+: "${E2E_CONFIG:?E2E_CONFIG must point at a client config (e.g. jura-dev.toml)}"
 : "${E2E_IDENTITY_FILE:?E2E_IDENTITY_FILE must point at the HOPR identity file}"
 : "${E2E_IDENTITY_PASS_FILE:?E2E_IDENTITY_PASS_FILE must point at a file holding the identity password}"
-: "${E2E_BLOKLI_URL:?E2E_BLOKLI_URL must be set (e.g. https://blokli.rotsee.hoprnet.link)}"
+: "${E2E_BLOKLI_URL:?E2E_BLOKLI_URL must be set (e.g. https://blokli.jura.dev.gnosisvpn.io)}"
 
 # Default to the .safe sitting next to the identity, as gnosis_vpn lays it out
 safe_file="${E2E_IDENTITY_SAFE_FILE:-${E2E_IDENTITY_FILE%.id}.safe}"

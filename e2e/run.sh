@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end browser tests against a live Gnosis VPN stack: for each destination, connect, let the data path settle, drive the browser harness through the tunnel, then disconnect. Aggregates every per-exit record into summary.csv at the end. Default mode drives the testenv's containerised client (`just up`) and runs the browser in a sidecar sharing that container's network namespace. `--client-mode host` instead talks to a client running natively on this host (rotsee, or `just up-client-on-host`) and runs obscura on the host.
+# End-to-end browser tests against a live Gnosis VPN stack: for each destination, connect, let the data path settle, drive the browser harness through the tunnel, then disconnect. Aggregates every per-exit record into summary.csv at the end. Default mode drives the testenv's containerised client (`just up`) and runs the browser in a sidecar sharing that container's network namespace. `--client-mode host` instead talks to a client running natively on this host (jura-dev, or `just up-client-on-host`) and runs obscura on the host.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -9,7 +9,7 @@ CLIENT_CONTAINER="${CLIENT_CONTAINER:-gnosis_vpn-client}"
 E2E_IMAGE="${E2E_IMAGE:-gnosis_vpn-e2e}"
 E2E_OUT_DIR="${E2E_OUT_DIR:-/tmp/gnosis_vpn-testenv-e2e}"
 SIDECAR_NAME="${SIDECAR_NAME:-gnosis_vpn-e2e-run}"
-# The wg peer address the client pings; testenv generates 10.129.0.1 from templates/client.toml.tpl, rotsee uses 10.128.0.1.
+# The wg peer address the client pings; testenv generates 10.129.0.1 from templates/client.toml.tpl, jura-dev uses 10.128.0.1.
 PING_TARGETS="${PING_TARGETS:-1.1.1.1,10.129.0.1}"
 SETTLE_SECS="${SETTLE_SECS:-15}"
 DEST_READY_TIMEOUT="${DEST_READY_TIMEOUT:-180}"

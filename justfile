@@ -319,7 +319,7 @@ e2e *ARGS: build-e2e
 # Mirrors how `system-tests` owns its daemon instead of attaching to a pre-running one.
 # Needs sudo (WireGuard + routing table); the worker runs as you.
 # Full tunnel: while it runs, this machine's traffic egresses through the exit under test.
-# Run the e2e browser suite against a real network (rotsee etc), starting our own client
+# Run the e2e browser suite against a real network (jura-dev etc), starting our own client
 e2e-on-network *ARGS:
     @scripts/testenv/e2e-on-network.sh {{ARGS}}
 

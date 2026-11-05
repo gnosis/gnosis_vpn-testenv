@@ -47,7 +47,7 @@ for (const f of files) {
   );
   const st = j.speedtests || [];
   const p1111 = (j.ping || []).find((p) => p.target === "1.1.1.1") || {};
-  // Whichever ping target isn't the public one is the tunnel gateway — its address is environment-specific (rotsee 10.128.0.1, testenv 10.129.0.1).
+  // Whichever ping target isn't the public one is the tunnel gateway — its address is environment-specific (jura-dev 10.128.0.1, testenv 10.129.0.1).
   const pgw = (j.ping || []).find((p) => p.target !== "1.1.1.1") || {};
   const hops = j.crawl || [];
   const hopsOk = hops.filter((h) => h.outcome === "ok");
