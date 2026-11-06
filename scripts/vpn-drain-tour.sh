@@ -311,7 +311,7 @@ run_tour() {
             stop_reason="worker offline: start it with gnosis_vpn-ctl start-client"
             break
         fi
-        funding_json="$(jq -c '{
+        funding_json="$(jq -ec '{
             traffic: (.data.funding_status.traffic.type // "unknown"),
             gas: (.data.funding_status.gas.type // "unknown")
           }' <<<"$balance_json" 2>/dev/null)" || funding_json='{"traffic":"unknown","gas":"unknown"}'

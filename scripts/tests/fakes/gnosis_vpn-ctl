@@ -73,6 +73,9 @@ status)
     exit 0
     ;;
 balance)
+    if [ "${FAKE_CTL_BALANCE_SILENT:-0}" -eq 1 ]; then
+        exit 1
+    fi
     if [ "${FAKE_CTL_WORKER_OFFLINE:-0}" -eq 1 ]; then
         echo '{"type":"worker_offline"}'
         exit 69

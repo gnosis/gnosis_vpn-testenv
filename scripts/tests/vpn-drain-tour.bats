@@ -151,3 +151,15 @@ setup() {
     [[ "$output" == *"worker offline"* ]]
     [ ! -s "$OUT_DIR/runs.jsonl" ]
 }
+
+@test "tour records unknown funding when ctl balance fails without output" {
+    export FAKE_CTL_BALANCE_SILENT=1
+
+    run "$SCRIPT" --out-dir "$OUT_DIR" --max-rounds 1 --quick --poll-interval 1 --connect-timeout 5
+    [ "$status" -eq 0 ]
+
+    run jq -s 'length' "$OUT_DIR/runs.jsonl"
+    [ "$output" -eq 3 ]
+    run jq -sc '[.[].funding_status_snapshot.traffic] | unique' "$OUT_DIR/runs.jsonl"
+    [ "$output" = '["unknown"]' ]
+}
