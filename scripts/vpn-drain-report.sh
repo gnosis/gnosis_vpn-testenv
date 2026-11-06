@@ -135,8 +135,8 @@ write_programs() {
           | ($rows | map(select(.round==$rnd))) as $rr
           | {
               round: $rnd,
-              traffic: ($rr | map(.funding_status_snapshot.traffic) | first // "Unknown"),
-              gas: ($rr | map(.funding_status_snapshot.gas) | first // "Unknown"),
+              traffic: ($rr | map(.funding_status_snapshot.traffic) | first // "unknown"),
+              gas: ($rr | map(.funding_status_snapshot.gas) | first // "unknown"),
               connected_count: ($rr | map(select(.outcome=="connected")) | length)
             }
       ] | reduce .[] as $item
@@ -381,10 +381,12 @@ function htmlescape(s) {
     gsub(/>/, "\\&gt;", s)
     return s
 }
+# tolower: run dirs from before the slim-IPC ctl recorded "Good"/"Low"/"Empty".
 function funding_color(level) {
-    if (level == "Good") return "#16a34a"
-    if (level == "Low") return "#d97706"
-    if (level == "Empty") return "#dc2626"
+    level = tolower(level)
+    if (level == "good") return "#16a34a"
+    if (level == "low") return "#d97706"
+    if (level == "empty") return "#dc2626"
     return "#9ca3af"
 }
 BEGIN { FS = "\t" }

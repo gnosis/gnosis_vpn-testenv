@@ -31,9 +31,9 @@ write_fixture() {
 
 @test "renders a report with a comparison row, heatmap and per-destination section for each destination" {
     write_fixture <<'JSONL'
-{"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":0,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"Good","gas":"Good"},"started_at":"t1","ended_at":"t2"}
-{"round":1,"destination_id":"fr1","address":"0xBBB","selection":{"capacity_used":null,"capacity_available":null,"ping_rtt_ms":null},"outcome":"skipped","reason":"state: NeedsChannel","metrics":{},"funding_status_snapshot":{"traffic":"Good","gas":"Good"},"started_at":"t1","ended_at":"t1"}
-{"round":2,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":2,"capacity_available":10,"ping_rtt_ms":42.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":15.1,"packet_loss_pct":0,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":480000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"Low","gas":"Good"},"started_at":"t3","ended_at":"t4"}
+{"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":0,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"good","gas":"good"},"started_at":"t1","ended_at":"t2"}
+{"round":1,"destination_id":"fr1","address":"0xBBB","selection":{"capacity_used":null,"capacity_available":null,"ping_rtt_ms":null},"outcome":"skipped","reason":"state: not_routable","metrics":{},"funding_status_snapshot":{"traffic":"good","gas":"good"},"started_at":"t1","ended_at":"t1"}
+{"round":2,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":2,"capacity_available":10,"ping_rtt_ms":42.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":15.1,"packet_loss_pct":0,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":480000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"low","gas":"good"},"started_at":"t3","ended_at":"t4"}
 JSONL
 
     run "$SCRIPT" --run-dir "$RUN_DIR"
@@ -61,7 +61,7 @@ JSONL
 
 @test "avg packet loss renders as a percent, not rescaled as if it were a 0..1 fraction" {
     write_fixture <<'JSONL'
-{"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":12.5,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"Good","gas":"Good"},"started_at":"t1","ended_at":"t2"}
+{"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":12.5,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"good","gas":"good"},"started_at":"t1","ended_at":"t2"}
 JSONL
 
     run "$SCRIPT" --run-dir "$RUN_DIR"
@@ -74,7 +74,7 @@ JSONL
 
 @test "--out writes the report to a custom path" {
     write_fixture <<'JSONL'
-{"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":0,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"Good","gas":"Good"},"started_at":"t1","ended_at":"t2"}
+{"round":1,"destination_id":"de1","address":"0xAAA","selection":{"capacity_used":1,"capacity_available":10,"ping_rtt_ms":40.0},"outcome":"connected","reason":null,"metrics":{"gateway_ping_avg_ms":12.3,"packet_loss_pct":0,"https_ok":3,"https_total":3,"downloads":{},"streaming_bps":500000,"egress_ip":"1.2.3.4","egress_loc":"DE"},"funding_status_snapshot":{"traffic":"good","gas":"good"},"started_at":"t1","ended_at":"t2"}
 JSONL
     local custom="${BATS_TEST_TMPDIR}/custom.html"
     run "$SCRIPT" --run-dir "$RUN_DIR" --out "$custom"
