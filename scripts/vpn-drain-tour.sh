@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vpn-drain-tour.sh - each round, connect to every configured destination once (best exit-capacity/latency first, recording why any destination can't connect), smoke-test it, and repeat rounds until `gnosis_vpn-ctl balance` reports funding as Empty or nothing connects; writes raw runs.jsonl/metrics.csv only (run vpn-drain-report.sh against the output dir for the comparison report).
+# vpn-drain-tour.sh - each round, connect to every configured destination once (routable first, lowest cached exit latency first, recording why any destination can't connect), smoke-test it, and repeat rounds until `gnosis_vpn-ctl balance` reports traffic funding as empty, the worker is offline, or nothing connects; writes raw runs.jsonl/metrics.csv only (run vpn-drain-report.sh against the output dir for the comparison report).
 # Required commands: bash, gnosis_vpn-ctl, jq, curl, ping, awk, uname. Run `./vpn-drain-tour.sh --help` for options.
 # Fetch this alongside vpn-smoke-test.sh/vpn-drain-report.sh: see scripts/README.md.
 
@@ -56,36 +56,36 @@ iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # Destination ranking
 # ---------------------------------------------------------------------------
 
-# rank_destinations <status-json> -> best-to-worst JSON array: tier 0 = ReadyToConnect/Connecting with known exit health (sorted by used-capacity fraction then latency), tier 1 = Routable (connectable, health unknown), tier 2 = not connectable now (recorded as skipped, no connect attempt).
+# rank_destinations <status-json> -> best-to-worst JSON array: routable destinations first, by the cached quick-probe RTT (status carries one only after a `quick-probe` request); the rest are recorded as skipped, no connect attempt.
 rank_destinations() {
     jq -c '
-      .Status.destinations
+      .data.destinations
       | map(
           (.route_health) as $rh
           | (.destination) as $d
-          | ($rh.state.state // "NoHealth") as $state
-          | (if ($state == "ReadyToConnect" or $state == "Connecting") then 0
-             elif ($state == "Routable") then 1
-             else 2 end) as $tier
+          # A re-check keeps its previous result in .last.
+          | ($rh.quick_probe // null
+             | if .type == "checked" then . elif .type == "checking" then .last else null end) as $qp
+          | ($rh.state // null
+             | if . == null then "no_route_health"
+               elif .type == "unrecoverable" then "unrecoverable: " + .reason.type
+               else .type end) as $state
           | {
               id: $d.id,
               address: $d.address,
               state: $state,
               last_error: ($rh.last_error // null),
-              available: ($rh.state.exit.health.slots.available // null),
-              connected_slots: ($rh.state.exit.health.slots.connected // null),
-              ping_rtt_ms: ($rh.state.exit.ping_rtt // null),
-              tier: $tier,
-              used_fraction: (if (($rh.state.exit.health.slots.available // 0) > 0)
-                              then ($rh.state.exit.health.slots.connected / $rh.state.exit.health.slots.available)
-                              else 999 end)
+              available: ($qp.load.slots.available // null),
+              connected_slots: ($qp.load.slots.connected // null),
+              ping_rtt_ms: ($qp.status_rtt // null),
+              connectable: ($state == "routable")
             }
         )
-      | sort_by([.tier, .used_fraction, (.ping_rtt_ms // 999999)])
+      | sort_by([(if .connectable then 0 else 1 end), (.ping_rtt_ms // 999999)])
     ' <<<"$1"
 }
 
-# skip_reason <ranked-entry-json> -> human-readable reason a tier-2 destination can't connect.
+# skip_reason <ranked-entry-json> -> human-readable reason a non-routable destination can't connect.
 skip_reason() {
     jq -r '.last_error // ("state: " + .state)' <<<"$1"
 }
@@ -98,7 +98,7 @@ wait_for_connected() {
     local id="$1" timeout="$2" waited=0 status_json cid
     while [ "$waited" -lt "$timeout" ]; do
         status_json="$(get_status_json)" || true
-        cid="$(jq -r '.Status.connected.destination_id // empty' <<<"$status_json" 2>/dev/null || true)"
+        cid="$(jq -r '.data.connection | select(.type == "connected") | .destination' <<<"$status_json" 2>/dev/null || true)"
         [ "$cid" = "$id" ] && return 0
         sleep "$POLL_INTERVAL"
         waited=$((waited + POLL_INTERVAL))
@@ -272,12 +272,12 @@ run_round() {
     count="$(jq 'length' <<<"$ranked")"
 
     while [ "$i" -lt "$count" ]; do
-        local entry tier id address started ended reason
+        local entry connectable id address started ended reason
         entry="$(jq -c ".[$i]" <<<"$ranked")"
         i=$((i + 1))
-        tier="$(jq -r '.tier' <<<"$entry")"
+        connectable="$(jq -r '.connectable' <<<"$entry")"
 
-        if [ "$tier" -ge 2 ]; then
+        if [ "$connectable" != "true" ]; then
             id="$(jq -r '.id' <<<"$entry")"
             address="$(jq -r '.address' <<<"$entry")"
             reason="$(skip_reason "$entry")"
@@ -305,11 +305,19 @@ run_tour() {
             break
         fi
 
-        balance_json="$(get_balance_json)" || balance_json='{"Balance":{"Err":"gnosis_vpn-ctl balance failed"}}'
-        funding_json="$(jq -c '.Balance.Ok.funding_status // {traffic:"Unknown", gas:"Unknown"}' <<<"$balance_json")"
+        # ctl exits non-zero on service errors but still prints them as JSON.
+        balance_json="$(get_balance_json)" || true
+        if [ "$(jq -r '.type' <<<"$balance_json" 2>/dev/null)" = "worker_offline" ]; then
+            stop_reason="worker offline: start it with gnosis_vpn-ctl start-client"
+            break
+        fi
+        funding_json="$(jq -c '{
+            traffic: (.data.funding_status.traffic.type // "unknown"),
+            gas: (.data.funding_status.gas.type // "unknown")
+          }' <<<"$balance_json" 2>/dev/null)" || funding_json='{"traffic":"unknown","gas":"unknown"}'
         traffic="$(jq -r '.traffic' <<<"$funding_json")"
-        if [ "$traffic" = "Empty" ]; then
-            stop_reason="funds drained: traffic funding status is Empty"
+        if [ "$traffic" = "empty" ]; then
+            stop_reason="funds drained: traffic funding status is empty"
             break
         fi
 
@@ -391,11 +399,12 @@ usage() {
     cat <<'EOF'
 Usage: vpn-drain-tour.sh [options]
 
-Cycle through every configured Gnosis VPN destination, best exit-capacity/
-latency first, smoke-testing each connection and recording the results.
-Repeats full rounds - destination capacity and account funding both change
-over time - until the account's traffic funding is reported Empty or a whole
-round fails to connect to anything.
+Cycle through every configured Gnosis VPN destination, routable ones first
+(lowest cached exit latency first), smoke-testing each connection and
+recording the results. Repeats full rounds - route health and account
+funding both change over time - until the account's traffic funding is
+reported empty, the worker is offline, or a whole round fails to connect
+to anything.
 
 Options:
       --out-dir DIR         Where to write run data (default ./vpn-drain-runs/<UTC timestamp>)

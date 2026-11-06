@@ -13,38 +13,41 @@ setup() {
 
 # --- unit: ranking -----------------------------------------------------
 
-@test "rank_destinations sorts ReadyToConnect by used-capacity fraction then latency" {
+@test "rank_destinations puts routable first, ordered by cached quick-probe RTT" {
     local status_json
-    status_json='{"Status":{"destinations":[
-        {"destination":{"id":"high-use","address":"0xA"},
-         "route_health":{"state":{"state":"ReadyToConnect","exit":{"ping_rtt":10,"health":{"slots":{"available":10,"connected":9}}}}}},
-        {"destination":{"id":"low-use","address":"0xB"},
-         "route_health":{"state":{"state":"ReadyToConnect","exit":{"ping_rtt":50,"health":{"slots":{"available":10,"connected":1}}}}}},
-        {"destination":{"id":"no-channel","address":"0xC"},
-         "route_health":{"state":{"state":"NeedsChannel"}}}
+    status_json='{"type":"status","data":{"destinations":[
+        {"destination":{"id":"slow","address":"0xA"},
+         "route_health":{"state":{"type":"routable"},"quick_probe":{"type":"checked","status_rtt":90,"load":{"slots":{"available":9,"connected":1}}}}},
+        {"destination":{"id":"no-route","address":"0xC"},
+         "route_health":{"state":{"type":"not_routable"},"quick_probe":null}},
+        {"destination":{"id":"fast","address":"0xB"},
+         "route_health":{"state":{"type":"routable"},"quick_probe":{"type":"checking","since":0,"last":{"status_rtt":20,"load":{"slots":{"available":5,"connected":5}}}}}}
     ]}}'
-    run bash -c "source '$SCRIPT'; rank_destinations '$status_json' | jq -c '[.[].id]'"
+    run bash -c "source '$SCRIPT'; rank_destinations '$status_json' | jq -c '[.[] | [.id, .connectable, .ping_rtt_ms, .available]]'"
     [ "$status" -eq 0 ]
-    [ "$output" = '["low-use","high-use","no-channel"]' ]
+    [ "$output" = '[["fast",true,20,5],["slow",true,90,9],["no-route",false,null,null]]' ]
 }
 
-@test "rank_destinations puts Routable (no exit data) after known-capacity destinations" {
+@test "rank_destinations puts routable without a cached quick probe after measured ones, and names why others are unconnectable" {
     local status_json
-    status_json='{"Status":{"destinations":[
-        {"destination":{"id":"routable","address":"0xA"}, "route_health":{"state":{"state":"Routable"}}},
-        {"destination":{"id":"known","address":"0xB"},
-         "route_health":{"state":{"state":"ReadyToConnect","exit":{"ping_rtt":10,"health":{"slots":{"available":10,"connected":5}}}}}}
+    status_json='{"type":"status","data":{"destinations":[
+        {"destination":{"id":"unmeasured","address":"0xA"}, "route_health":{"state":{"type":"routable"},"quick_probe":null}},
+        {"destination":{"id":"bad-api","address":"0xD"},
+         "route_health":{"state":{"type":"unrecoverable","reason":{"type":"incompatible_api_version","offered":[]}},"quick_probe":null}},
+        {"destination":{"id":"measured","address":"0xB"},
+         "route_health":{"state":{"type":"routable"},"quick_probe":{"type":"checked","status_rtt":50,"load":{"slots":{"available":5,"connected":5}}}}},
+        {"destination":{"id":"unchecked","address":"0xE"}, "route_health":null}
     ]}}'
-    run bash -c "source '$SCRIPT'; rank_destinations '$status_json' | jq -c '[.[].id]'"
+    run bash -c "source '$SCRIPT'; rank_destinations '$status_json' | jq -c '[.[] | [.id, .state]]'"
     [ "$status" -eq 0 ]
-    [ "$output" = '["known","routable"]' ]
+    [ "$output" = '[["measured","routable"],["unmeasured","routable"],["bad-api","unrecoverable: incompatible_api_version"],["unchecked","no_route_health"]]' ]
 }
 
 @test "skip_reason prefers last_error over the bare state name" {
-    run bash -c "source '$SCRIPT'; skip_reason '{\"state\":\"Unrecoverable\",\"last_error\":\"not allowed\"}'"
+    run bash -c "source '$SCRIPT'; skip_reason '{\"state\":\"unrecoverable: not_allowed\",\"last_error\":\"not allowed\"}'"
     [ "$output" = "not allowed" ]
-    run bash -c "source '$SCRIPT'; skip_reason '{\"state\":\"NeedsChannel\",\"last_error\":null}'"
-    [ "$output" = "state: NeedsChannel" ]
+    run bash -c "source '$SCRIPT'; skip_reason '{\"state\":\"not_routable\",\"last_error\":null}'"
+    [ "$output" = "state: not_routable" ]
 }
 
 # --- cli surface ------------------------------------------------------------
@@ -92,13 +95,13 @@ setup() {
 
 # --- whole run ---------------------------------------------------------
 
-@test "tour connects best-first, records a rejected connect, skips a needs-channel destination, and stops when funds drain" {
+@test "tour connects best-first, records a rejected connect, skips a not-routable destination, and stops when funds drain" {
     export FAKE_CTL_FAIL_CONNECT="us1"
     export FAKE_CTL_EMPTY_AFTER=3
 
     run "$SCRIPT" --out-dir "$OUT_DIR" --max-rounds 5 --quick --poll-interval 1 --connect-timeout 5
     [ "$status" -eq 0 ]
-    [[ "$output" == *"funds drained: traffic funding status is Empty"* ]]
+    [[ "$output" == *"funds drained: traffic funding status is empty"* ]]
 
     [ -f "$OUT_DIR/runs.jsonl" ]
     run jq -s 'length' "$OUT_DIR/runs.jsonl"
@@ -111,7 +114,7 @@ setup() {
     run jq -s '[.[] | select(.outcome=="skipped" and .destination_id=="fr1")] | length' "$OUT_DIR/runs.jsonl"
     [ "$output" -eq 2 ]
 
-    # de1 (used-capacity fraction 0.2) is attempted before us1 (0.8) every round.
+    # de1 (cached RTT 40 ms) is attempted before us1 (80 ms) every round.
     run jq -sc '[.[] | select(.round==1) | .destination_id]' "$OUT_DIR/runs.jsonl"
     [ "$output" = '["de1","us1","fr1"]' ]
 
@@ -138,4 +141,13 @@ setup() {
 
     run jq -s '[.[].round] | unique | length' "$OUT_DIR/runs.jsonl"
     [ "$output" -eq 2 ]
+}
+
+@test "tour stops before round 1 when the worker is offline" {
+    export FAKE_CTL_WORKER_OFFLINE=1
+
+    run "$SCRIPT" --out-dir "$OUT_DIR" --max-rounds 5 --quick --poll-interval 1 --connect-timeout 5
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"worker offline"* ]]
+    [ ! -s "$OUT_DIR/runs.jsonl" ]
 }
