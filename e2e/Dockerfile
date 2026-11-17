@@ -27,6 +27,6 @@ RUN set -eu; \
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY harness.mjs aggregate.mjs entrypoint.sh ./
+COPY harness.mjs aggregate.mjs entrypoint.sh download.sh ./
 
 ENTRYPOINT ["/app/entrypoint.sh"]

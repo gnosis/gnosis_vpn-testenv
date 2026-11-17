@@ -19,6 +19,7 @@ CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-150}"
 DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-60}"
 COOLDOWN_SECS="${COOLDOWN_SECS:-5}"
 QUICK=0
+BROWSER=1
 
 # spawn mode only: the suite starts (and stops) gnosis_vpn-root itself, mirroring how
 # gnosis_vpn-system_tests owns its daemon rather than attaching to a pre-running one.
@@ -46,14 +47,21 @@ Usage: run.sh [options]
 
 Options:
   -d, --destination ID...   Destinations to test (default: every destination the client reports)
-      --client-mode MODE    container (default) | host
-      --quick               Short profile: one speedtest pass, 20s down / 10s up, 2 crawl hops
+      --client-mode MODE    container (default) | host | spawn
+      --quick               Short profile: one speedtest pass, 20s down / 10s up, 2 crawl hops,
+                            one 100 MB download in a 300s window
+      --download-runs N     100 MB pulls per destination after the browser (default 3, 0 = off)
+      --download-window S   per-destination budget for all pulls (default 840)
+      --download-url URL    file to pull (default CacheFly 100 MB, HTTP/3-capable)
+      --no-browser          skip the browser harness, only run the download pulls
       --out-dir DIR         Parent output directory (default $E2E_OUT_DIR)
   -h, --help                Show this help
 
 Environment: CLIENT_CONTAINER, E2E_IMAGE, E2E_OUT_DIR, PING_TARGETS, SETTLE_SECS,
 CONNECT_TIMEOUT, NAV_TIMEOUT_MS, DOWNLOAD_SECS, UPLOAD_SECS, DWELL_MS, CRAWL_START,
-CRAWL_HOPS, YT_VIDEO_INDEX. Host mode also reads GVPN_CTL, SOCKET_PATH, OBSCURA.
+CRAWL_HOPS, YT_VIDEO_INDEX, DOWNLOAD_RUNS, DOWNLOAD_WINDOW_SECS, DOWNLOAD_SLEEP_SECS,
+DOWNLOAD_URL, DOWNLOAD_HTTP3 (auto|on|off), CURL_BIN, GATE_REQUIRED_SITES.
+Host mode also reads GVPN_CTL, SOCKET_PATH, OBSCURA.
 EOF
 }
 
@@ -77,6 +85,22 @@ while [ $# -gt 0 ]; do
         ;;
     --quick)
         QUICK=1
+        shift
+        ;;
+    --download-runs)
+        DOWNLOAD_RUNS="$2"
+        shift 2
+        ;;
+    --download-window)
+        DOWNLOAD_WINDOW_SECS="$2"
+        shift 2
+        ;;
+    --download-url)
+        DOWNLOAD_URL="$2"
+        shift 2
+        ;;
+    --no-browser)
+        BROWSER=0
         shift
         ;;
     -h | --help)
@@ -104,6 +128,15 @@ if [ "$QUICK" -eq 1 ]; then
     export UPLOAD_SECS="${UPLOAD_SECS:-10}"
     export CRAWL_HOPS="${CRAWL_HOPS:-2}"
     export SPEEDTEST_RUNS="${SPEEDTEST_RUNS:-1}"
+    DOWNLOAD_RUNS="${DOWNLOAD_RUNS:-1}"
+    DOWNLOAD_WINDOW_SECS="${DOWNLOAD_WINDOW_SECS:-300}"
+fi
+export DOWNLOAD_RUNS="${DOWNLOAD_RUNS:-3}"
+export DOWNLOAD_WINDOW_SECS="${DOWNLOAD_WINDOW_SECS:-840}"
+[ -n "${DOWNLOAD_URL:-}" ] && export DOWNLOAD_URL
+if [ "$BROWSER" -eq 0 ] && [ "$DOWNLOAD_RUNS" -eq 0 ]; then
+    echo "--no-browser with --download-runs 0 leaves nothing to run" >&2
+    exit 2
 fi
 
 # ─── Client control ────────────────────────────────────────────────────────────
@@ -258,7 +291,9 @@ spawn_daemon() {
     chmod 0600 "$data_dir/hopr.id" "$data_dir/hopr.pass"
 
     echo "-- spawning gnosis_vpn-root (log $SPAWN_LOG)"
+    # The packaged service sets GNOSISVPN_FORCE_STATIC_ROUTING; pass it on so a gate runs what ships.
     sudo RUST_LOG="${DAEMON_LOG_LEVEL:-info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug}" \
+        ${GNOSISVPN_FORCE_STATIC_ROUTING:+"GNOSISVPN_FORCE_STATIC_ROUTING=$GNOSISVPN_FORCE_STATIC_ROUTING"} \
         "$GVPN_ROOT_BIN" \
         --config-path "$GVPN_CONFIG" \
         --hopr-blokli-url "$GVPN_BLOKLI_URL" \
@@ -373,7 +408,10 @@ trap cleanup EXIT INT TERM
 if [ "$CLIENT_MODE" != "container" ]; then
     if ! curl -sf --max-time 3 "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then
         echo "== starting obscura serve =="
-        "$OBSCURA" serve --port "$CDP_PORT" --stealth >"$OUTDIR/obscura-serve.log" 2>&1 &
+        # obscura's own page.goto deadline defaults to 30s, below the harness's
+        # NAV_TIMEOUT_MS, so heavy pages died on obscura's clock, not ours.
+        OBSCURA_NAV_TIMEOUT_MS="${OBSCURA_NAV_TIMEOUT_MS:-${NAV_TIMEOUT_MS:-90000}}" \
+            "$OBSCURA" serve --port "$CDP_PORT" --stealth >"$OUTDIR/obscura-serve.log" 2>&1 &
         STARTED_OBSCURA=$!
         for _ in $(seq 1 20); do
             curl -sf --max-time 2 "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1 && break
@@ -396,18 +434,30 @@ jq -n \
     )" \
     --arg client_mode "$CLIENT_MODE" \
     --arg testenv_commit "$(repo_commit "$HERE/..")" \
-    --arg client_commit "$(repo_commit "${GVPN_CLIENT_DIR:-$HERE/../../gnosis_vpn-client}")" \
+    --arg client_commit "${GATE_CLIENT_COMMIT:-$(repo_commit "${GVPN_CLIENT_DIR:-$HERE/../../gnosis_vpn-client}")}" \
     --arg server_commit "$(repo_commit "${GVPN_SERVER_DIR:-$HERE/../../gnosis_vpn-server}")" \
     --arg hoprd_commit "$(repo_commit "${HOPRD_DIR:-$HERE/../../hoprd}")" \
     --arg cluster_size "${CLUSTER_SIZE:-}" \
     --arg server_count "${SERVER_COUNT:-}" \
     --arg hops "${HOPS:-}" \
     --arg quick "$QUICK" \
+    --arg browser "$BROWSER" \
+    --arg network "${GATE_NETWORK:-}" \
+    --arg identity "${GVPN_IDENTITY:-}" \
+    --arg hoprd_version "${GATE_HOPRD_VERSION:-}" \
+    --arg client_version "${GATE_CLIENT_VERSION:-}" \
+    --arg download_runs "$DOWNLOAD_RUNS" \
+    --arg download_window "$DOWNLOAD_WINDOW_SECS" \
+    --arg download_url "${DOWNLOAD_URL:-}" \
     --arg ping_targets "$PING_TARGETS" \
     --arg machine "$(uname -sm)" \
     --arg disconnected_baseline_trace "$BASELINE_TRACE" \
     '{
        run_ts: $run_ts, exits: $exits, client_mode: $client_mode, quick: ($quick == "1"),
+       browser: ($browser == "1"),
+       gate: { network: $network, identity: $identity, hoprd_version: $hoprd_version,
+               client_version: $client_version },
+       download: { runs: ($download_runs | tonumber), window_secs: ($download_window | tonumber), url: $download_url },
        commits: { testenv: $testenv_commit, gnosis_vpn_client: $client_commit,
                   gnosis_vpn_server: $server_commit, hoprd: $hoprd_commit },
        stack: { cluster_size: $cluster_size, server_count: $server_count, hops: $hops },
@@ -432,6 +482,7 @@ drive_harness() {
             --env PING_TARGETS="$PING_TARGETS" \
             --env YT_VIDEO_INDEX="$YT_VIDEO_INDEX" \
             ${NAV_TIMEOUT_MS:+--env NAV_TIMEOUT_MS="$NAV_TIMEOUT_MS"} \
+            ${OBSCURA_NAV_TIMEOUT_MS:+--env OBSCURA_NAV_TIMEOUT_MS="$OBSCURA_NAV_TIMEOUT_MS"} \
             ${DOWNLOAD_SECS:+--env DOWNLOAD_SECS="$DOWNLOAD_SECS"} \
             ${UPLOAD_SECS:+--env UPLOAD_SECS="$UPLOAD_SECS"} \
             ${DWELL_MS:+--env DWELL_MS="$DWELL_MS"} \
@@ -463,6 +514,25 @@ run_harness() {
 # fatal_record <exit> <reason> -> the per-exit JSON aggregate.mjs expects when a run never started
 fatal_record() {
     jq -n --arg exit "$1" --arg err "$2" '{exit: $exit, fatal_error: $err}' >"$OUTDIR/$1.json"
+}
+
+# run_download <exit> -> 100 MB pulls through the still-connected tunnel, <OUTDIR>/<exit>.download.csv
+run_download() {
+    local exit_id="$1"
+    [ "$DOWNLOAD_RUNS" -gt 0 ] || return 0
+    if [ "$CLIENT_MODE" = "container" ]; then
+        docker run --rm --name "$SIDECAR_NAME" \
+            --network "container:$CLIENT_CONTAINER" \
+            --volume "$OUTDIR:/out" \
+            --env DOWNLOAD_RUNS --env DOWNLOAD_WINDOW_SECS \
+            ${DOWNLOAD_URL:+--env DOWNLOAD_URL} \
+            ${DOWNLOAD_SLEEP_SECS:+--env DOWNLOAD_SLEEP_SECS} \
+            ${DOWNLOAD_HTTP3:+--env DOWNLOAD_HTTP3} \
+            --entrypoint /app/download.sh \
+            "$E2E_IMAGE" "$exit_id" /out
+    else
+        "$HERE/download.sh" "$exit_id" "$OUTDIR"
+    fi 2>&1 | tee "$OUTDIR/$exit_id.download.log"
 }
 
 for EXIT_ID in "${EXITS[@]}"; do
@@ -527,7 +597,13 @@ for EXIT_ID in "${EXITS[@]}"; do
 
     ctl_json nerd-stats >"$OUTDIR/$EXIT_ID.nerdstats.json" || true
 
-    run_harness "$EXIT_ID"
+    if [ "$BROWSER" -eq 1 ]; then
+        run_harness "$EXIT_ID"
+    else
+        # aggregate.mjs keys rows off <exit>.json; a download-only run still needs one
+        jq -n --arg exit "$EXIT_ID" '{exit: $exit, browser_skipped: true}' >"$OUTDIR/$EXIT_ID.json"
+    fi
+    run_download "$EXIT_ID"
 
     echo "-- disconnect $EXIT_ID"
     ctl disconnect >/dev/null 2>&1
@@ -541,16 +617,21 @@ EXIT_ORDER="$(
     IFS=,
     echo "${EXITS[*]}"
 )"
+# aggregate.mjs exits non-zero when the release-gate verdict fails; that is this script's exit code.
+AGGREGATE_RC=0
 if [ "$CLIENT_MODE" = "container" ]; then
     # keeps node off the host's dependency list — the image already has it
     docker run --rm \
         --volume "$OUTDIR:/out" \
         --env OUTDIR=/out \
         --env EXIT_ORDER="$EXIT_ORDER" \
+        ${GATE_REQUIRED_SITES:+--env GATE_REQUIRED_SITES} \
         --entrypoint node \
-        "$E2E_IMAGE" /app/aggregate.mjs
+        "$E2E_IMAGE" /app/aggregate.mjs || AGGREGATE_RC=$?
 else
-    OUTDIR="$OUTDIR" EXIT_ORDER="$EXIT_ORDER" node "$HERE/aggregate.mjs"
+    OUTDIR="$OUTDIR" EXIT_ORDER="$EXIT_ORDER" node "$HERE/aggregate.mjs" || AGGREGATE_RC=$?
 fi
 
 echo "== done -> $OUTDIR =="
+# cleanup exits with the last status; a plain `exit` here makes shellcheck lose the trap-only functions (SC2329)
+[ "$AGGREGATE_RC" -eq 0 ]
