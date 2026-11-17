@@ -63,12 +63,13 @@ E2E_BLOKLI_URL=https://blokli.jura.dev.gnosisvpn.io \
 
 **Reuse your existing safe.** The `.safe` file must accompany the identity —
 without it the client cannot find its safe association and onboards a brand new,
-unfunded one instead, parking in `run_mode: PreparingSafe` forever. The recipe
+unfunded one instead, parking in `run_mode: preparing_safe` forever. The recipe
 picks up `<identity>.safe` automatically and warns loudly if it is missing.
 
-**Destinations are discovered**, not configured here: whatever `E2E_CONFIG`
-defines shows up via `gnosis_vpn-ctl status`. Add `--destination USA`
-(repeatable) to narrow it.
+**Destinations** are whatever `gnosis_vpn-ctl status` reports: those
+`E2E_CONFIG` defines plus, with a `version = 7` config, the exits the client
+discovers on-chain (the run waits up to `DEST_READY_TIMEOUT` for the first
+discovery). Add `--destination <id>` (repeatable) to narrow it.
 
 `sudo` is required — `gnosis_vpn-root` creates the WireGuard interface and edits
 the routing table, exactly as `just system-tests` does. The suite keeps the sudo
@@ -200,5 +201,5 @@ SPEEDTEST_RUNS=1`.
 - **"connected" ≠ routing.** The control plane can report connected while
   traffic still egresses locally, or while the exit health is flapping. `run.sh`
   waits `SETTLE_SECS` after connect before measuring; raise it if early probes
-  look wrong. If a destination is stuck `Routable`/`Unrecoverable`, wait for it
-  to reach `ReadyToConnect`.
+  look wrong. A destination stuck `not_routable` has no plannable path yet;
+  `unrecoverable` needs a config change or an exit upgrade.

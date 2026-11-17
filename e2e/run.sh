@@ -94,7 +94,7 @@ done
 case "$CLIENT_MODE" in
 container | host | spawn) ;;
 *)
-    echo "--client-mode must be 'container' or 'host'" >&2
+    echo "--client-mode must be 'container', 'host' or 'spawn'" >&2
     exit 2
     ;;
 esac
@@ -142,18 +142,21 @@ place_file() {
 }
 
 is_connected_to() { # is_connected_to <id>
-    [ "$(ctl_json status | jq -r '.Status.connected.destination_id // empty')" = "$1" ]
+    [ "$(ctl_json status | jq -r '.data.connection | select(.type == "connected") | .destination')" = "$1" ]
 }
 
+# connecting and reconnecting are .connection types too; a teardown can outlive the switch to disconnected
 is_disconnected() {
     ctl_json status | jq -e '
-        .Status
-        | (.connected | not)
-          and (.connecting | not)
-          and (.reconnecting | not)
-          and ((.disconnecting | if type == "array" then length == 0 else not end))
+        .data
+        | .connection.type == "disconnected"
+          and ((.disconnecting // []) | length == 0)
     ' >/dev/null
 }
+
+is_running() { ctl_json status | jq -e '.data.run_mode.type == "running"' >/dev/null 2>&1; }
+
+has_destinations() { ctl_json status | jq -e '.data.destinations | length > 0' >/dev/null 2>&1; }
 
 wait_for() { # wait_for <fn> <timeout_s> <label> [<arg>]
     local fn="$1" to="$2" label="$3" arg="${4:-}" i=0
@@ -250,7 +253,7 @@ spawn_daemon() {
     printf %s "$GVPN_IDENTITY_PASS" >"$pass_file"
     place_file "$pass_file" "$data_dir/hopr.pass"
     rm -f "$pass_file"
-    # without the .safe the client onboards a new, unfunded Safe and sits in PreparingSafe forever
+    # without the .safe the client onboards a new, unfunded Safe and sits in preparing_safe forever
     [ -n "$GVPN_IDENTITY_SAFE" ] && place_file "$GVPN_IDENTITY_SAFE" "$cache_dir/hopr.safe"
     chmod 0600 "$data_dir/hopr.id" "$data_dir/hopr.pass"
 
@@ -278,7 +281,7 @@ spawn_daemon() {
     # A spawned worker sits in Init for a while; a tour started there finds no destinations.
     i=0
     while [ "$i" -lt "$SPAWN_READY_TRIES" ]; do
-        if ctl_json status 2>/dev/null | jq -e '.Status.run_mode | objects | has("Running")' >/dev/null 2>&1; then
+        if is_running; then
             echo "-- daemon up (run_mode Running)"
             return 0
         fi
@@ -305,30 +308,32 @@ fi
 
 [ "$CLIENT_MODE" = "spawn" ] && spawn_daemon
 
-if ! ctl_json status | jq -e '.Status' >/dev/null; then
+if ! ctl_json status | jq -e '.type == "status"' >/dev/null; then
     echo "cannot reach the client's control socket via ${CLIENT_MODE} mode" >&2
     exit 2
 fi
 
 # The worker returns to idle mode once its start-client keep-alive expires,
-# which leaves the socket answering but run_mode "NotRunning" and every route_health null.
-if ctl_json status | jq -e '.Status.run_mode == "NotRunning"' >/dev/null; then
+# which leaves the socket answering but run_mode not_running and every route_health null.
+if ctl_json status | jq -e '.data.run_mode.type == "not_running"' >/dev/null; then
     echo "-- worker idle; starting client (keep-alive ${WORKER_KEEPALIVE})"
     start_client "$WORKER_KEEPALIVE" >/dev/null || {
         echo "failed to start the client worker" >&2
         exit 2
     }
     for _ in $(seq 1 "$WORKER_START_TRIES"); do
-        ctl_json status | jq -e '.Status.run_mode | objects | has("Running")' >/dev/null && break
+        is_running && break
         sleep 5
     done
 fi
 
 if [ ${#EXITS[@]} -eq 0 ]; then
+    # A v7 config may list no exits; the node discovers them on-chain once running, in one snapshot.
+    wait_for has_destinations "$DEST_READY_TIMEOUT" "exit discovery" || true
     # not mapfile: macOS ships bash 3.2
     while IFS= read -r dest_id; do
         [ -n "$dest_id" ] && EXITS+=("$dest_id")
-    done < <(ctl_json status | jq -r '.Status.destinations[].destination.id')
+    done < <(ctl_json status | jq -r '.data.destinations[].destination.id')
 fi
 if [ ${#EXITS[@]} -eq 0 ]; then
     echo "no destinations configured on the client" >&2
@@ -469,28 +474,28 @@ for EXIT_ID in "${EXITS[@]}"; do
     ensure_disconnected
 
     # Skip fast instead of burning CONNECT_TIMEOUT: route_health already knows when a
-    # destination cannot be dialled (NeedsChannel with too few relays, Unrecoverable/NotAllowed
-    # for a hop count the network refuses, NeedsPeering while the client is still warming up).
-    # NeedsPeering/NoHealth are warm-up states, not verdicts — poll until the destination is
-    # dialable (or clearly is not) rather than skipping the moment the client is still settling.
+    # destination cannot be dialled (not_routable with no plannable path, unrecoverable:
+    # not_allowed for a hop count the network refuses). not_routable and a missing route_health
+    # are also warm-up states, so poll until routable rather than skipping while the client settles.
     rh_waited=0
     while :; do
         rh_state="$(ctl_json status | jq -r --arg id "$EXIT_ID" '
-            .Status.destinations[] | select(.destination.id == $id)
-            | .route_health.state.state // .route_health.state // "unknown"')"
-        case "$rh_state" in
-        ReadyToConnect | Connecting | Routable) break ;;
-        esac
+            first(.data.destinations[] | select(.destination.id == $id)) // null
+            | if . == null then "unknown"
+              elif .route_health == null then "no_route_health"
+              elif .route_health.state.type == "unrecoverable" then "unrecoverable: " + .route_health.state.reason.type
+              else .route_health.state.type end')"
+        [ "$rh_state" = routable ] && break
         [ "$rh_waited" -ge "$DEST_READY_TIMEOUT" ] && break
         [ "$rh_waited" -eq 0 ] && echo "-- waiting up to ${DEST_READY_TIMEOUT}s for $EXIT_ID to become dialable (state: $rh_state)"
         sleep 5
         rh_waited=$((rh_waited + 5))
     done
     rh_reason="$(ctl_json status | jq -r --arg id "$EXIT_ID" '
-        .Status.destinations[] | select(.destination.id == $id)
-        | .route_health.state.reason // .route_health.last_error // ""')"
+        .data.destinations[] | select(.destination.id == $id)
+        | .route_health.state.reason.error // .route_health.last_error // ""')"
     case "$rh_state" in
-    ReadyToConnect | Connecting | Routable) ;;
+    routable) ;;
     *)
         echo "!! $EXIT_ID not connectable (state: $rh_state${rh_reason:+, reason: $rh_reason}) — skipping"
         fatal_record "$EXIT_ID" "not connectable (state: $rh_state${rh_reason:+, reason: $rh_reason})"
