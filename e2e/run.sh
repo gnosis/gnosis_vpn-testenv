@@ -436,7 +436,7 @@ jq -n \
     --arg testenv_commit "$(repo_commit "$HERE/..")" \
     --arg client_commit "${GATE_CLIENT_COMMIT:-$(repo_commit "${GVPN_CLIENT_DIR:-$HERE/../../gnosis_vpn-client}")}" \
     --arg server_commit "$(repo_commit "${GVPN_SERVER_DIR:-$HERE/../../gnosis_vpn-server}")" \
-    --arg hoprd_commit "$(repo_commit "${HOPRD_DIR:-$HERE/../../hoprd}")" \
+    --arg hoprd_commit "$([ -n "${GATE_HOPRD_VERSION:-}" ] || repo_commit "${HOPRD_DIR:-$HERE/../../hoprd}")" \
     --arg cluster_size "${CLUSTER_SIZE:-}" \
     --arg server_count "${SERVER_COUNT:-}" \
     --arg hops "${HOPS:-}" \
