@@ -200,3 +200,16 @@ The daemon log is at `/tmp/gnosis_vpn-e2e-daemon.log`.
 | every exit `not connectable (state: not_routable)` | the node is still warming up or has no channels; raise `DEST_READY_TIMEOUT`                 |
 | `no destinations configured on the client`         | discovery found nothing within `DEST_READY_TIMEOUT`; see the daemon log                     |
 | machine has no internet after a crash              | `sudo pkill -x gnosis_vpn-root`; the routes go away with the daemon                         |
+
+## Automation (later)
+
+The gate is manual today. To run it unattended it needs:
+
+- **A dedicated VM or network namespace.** The client takes the full tunnel and
+  a kill switch, which cuts a shared CI runner off from its own controller.
+- **A CI age key** added as a recipient of `identities/secrets.sops.yaml`.
+- **A dedicated gate identity per network** in products-ci, used by nothing
+  else.
+- **Wiring after the hoprd rc deploy**, so the gate runs once the release
+  candidate is live on the staging network and passes `GATE_HOPRD_VERSION`
+  along.

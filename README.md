@@ -287,6 +287,20 @@ grants that once per Safe — its nodes' and the client's extra identity's — w
 `HOPRD_CURVY_SCOPE_AGGREGATOR` is set, as `up-pix-curvy` does. A Safe without it
 fails its first shield with `NonExistentKey()`.
 
+## Release gate
+
+Before a hoprd release, run the prebuilt GnosisVPN client through every exit of
+piz-palu-staging: the browser tour plus 100 MB downloads. It exits non-zero
+unless every exit connects and loads the required sites:
+
+```sh
+nix develop -c env GVPN_IDENTITY=<identity> GATE_HOPRD_VERSION=5.0.3-pr.287 just release-gate-preflight
+nix develop -c env GVPN_IDENTITY=<identity> GATE_HOPRD_VERSION=5.0.3-pr.287 just release-gate
+```
+
+For the one-time setup (client build, sops access, the gate identity), the
+verdict rules and other networks, see [`RELEASE_GATE.md`](RELEASE_GATE.md).
+
 ## Running the end-to-end browser tests
 
 ```sh
