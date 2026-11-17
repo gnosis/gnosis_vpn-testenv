@@ -109,7 +109,10 @@ release.
    (`sudo systemctl stop gnosisvpn`).
 5. **Get sops access.** You need an age key whose public key is a recipient of
    `products-ci/identities/secrets.sops.yaml`, at `SOPS_AGE_KEY_FILE` (default
-   `~/.config/sops/age/keys.txt`, on macOS too).
+   `~/.config/sops/age/keys.txt`, on macOS too). The recipients are the shared
+   "Apps" and "Devops" keys from the password manager. The file holds one
+   `AGE-SECRET-KEY-1…` per line; every other line, including the `age1…` public
+   key, must start with `#`, or sops fails with `unknown identity type`.
 6. **Pick the gate identity.** `GVPN_IDENTITY` names an entry of
    `products-ci/identities/<network>.yaml`. There is no default. Two clients on
    one identity announce the same peer and fight over its channels, so never run
@@ -193,6 +196,7 @@ The daemon log is at `/tmp/gnosis_vpn-e2e-daemon.log`.
 | Symptom                                            | Cause / fix                                                                                 |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `sops cannot decrypt …`                            | your age key is not a recipient yet, or `SOPS_AGE_KEY_FILE` points to the wrong file        |
+| sops: `unknown identity type`                      | a `keys.txt` line is neither `AGE-SECRET-KEY-1…` nor a `#` comment (often the `age1…` line) |
 | `GVPN_IDENTITY … is not in …`                      | typo, or your products-ci checkout is outdated                                              |
 | `a gnosis_vpn-root is already running`             | the installed service or another run: `sudo systemctl stop gnosisvpn`                       |
 | `hopr.id holds another identity`                   | a different identity (or one the client re-encrypted) sits in your data dir; move it away   |
