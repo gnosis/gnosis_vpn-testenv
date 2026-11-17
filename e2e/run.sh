@@ -19,6 +19,7 @@ CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-150}"
 DISCONNECT_TIMEOUT="${DISCONNECT_TIMEOUT:-60}"
 COOLDOWN_SECS="${COOLDOWN_SECS:-5}"
 QUICK=0
+BROWSER=1
 
 # spawn mode only: the suite starts (and stops) gnosis_vpn-root itself, mirroring how
 # gnosis_vpn-system_tests owns its daemon rather than attaching to a pre-running one.
@@ -46,14 +47,21 @@ Usage: run.sh [options]
 
 Options:
   -d, --destination ID...   Destinations to test (default: every destination the client reports)
-      --client-mode MODE    container (default) | host
-      --quick               Short profile: one speedtest pass, 20s down / 10s up, 2 crawl hops
+      --client-mode MODE    container (default) | host | spawn
+      --quick               Short profile: one speedtest pass, 20s down / 10s up, 2 crawl hops,
+                            one 100 MB download in a 300s window
+      --download-runs N     100 MB pulls per destination after the browser (default 3, 0 = off)
+      --download-window S   per-destination budget for all pulls (default 840)
+      --download-url URL    file to pull (default CacheFly 100 MB, HTTP/3-capable)
+      --no-browser          skip the browser harness, only run the download pulls
       --out-dir DIR         Parent output directory (default $E2E_OUT_DIR)
   -h, --help                Show this help
 
 Environment: CLIENT_CONTAINER, E2E_IMAGE, E2E_OUT_DIR, PING_TARGETS, SETTLE_SECS,
 CONNECT_TIMEOUT, NAV_TIMEOUT_MS, DOWNLOAD_SECS, UPLOAD_SECS, DWELL_MS, CRAWL_START,
-CRAWL_HOPS, YT_VIDEO_INDEX. Host mode also reads GVPN_CTL, SOCKET_PATH, OBSCURA.
+CRAWL_HOPS, YT_VIDEO_INDEX, DOWNLOAD_RUNS, DOWNLOAD_WINDOW_SECS, DOWNLOAD_SLEEP_SECS,
+DOWNLOAD_URL, DOWNLOAD_HTTP3 (auto|on|off), CURL_BIN, GATE_REQUIRED_SITES.
+Host mode also reads GVPN_CTL, SOCKET_PATH, OBSCURA.
 EOF
 }
 
@@ -79,6 +87,22 @@ while [ $# -gt 0 ]; do
         QUICK=1
         shift
         ;;
+    --download-runs)
+        DOWNLOAD_RUNS="$2"
+        shift 2
+        ;;
+    --download-window)
+        DOWNLOAD_WINDOW_SECS="$2"
+        shift 2
+        ;;
+    --download-url)
+        DOWNLOAD_URL="$2"
+        shift 2
+        ;;
+    --no-browser)
+        BROWSER=0
+        shift
+        ;;
     -h | --help)
         usage
         exit 0
@@ -94,7 +118,7 @@ done
 case "$CLIENT_MODE" in
 container | host | spawn) ;;
 *)
-    echo "--client-mode must be 'container' or 'host'" >&2
+    echo "--client-mode must be 'container', 'host' or 'spawn'" >&2
     exit 2
     ;;
 esac
@@ -104,6 +128,15 @@ if [ "$QUICK" -eq 1 ]; then
     export UPLOAD_SECS="${UPLOAD_SECS:-10}"
     export CRAWL_HOPS="${CRAWL_HOPS:-2}"
     export SPEEDTEST_RUNS="${SPEEDTEST_RUNS:-1}"
+    DOWNLOAD_RUNS="${DOWNLOAD_RUNS:-1}"
+    DOWNLOAD_WINDOW_SECS="${DOWNLOAD_WINDOW_SECS:-300}"
+fi
+export DOWNLOAD_RUNS="${DOWNLOAD_RUNS:-3}"
+export DOWNLOAD_WINDOW_SECS="${DOWNLOAD_WINDOW_SECS:-840}"
+[ -n "${DOWNLOAD_URL:-}" ] && export DOWNLOAD_URL
+if [ "$BROWSER" -eq 0 ] && [ "$DOWNLOAD_RUNS" -eq 0 ]; then
+    echo "--no-browser with --download-runs 0 leaves nothing to run" >&2
+    exit 2
 fi
 
 # ─── Client control ────────────────────────────────────────────────────────────
@@ -142,18 +175,21 @@ place_file() {
 }
 
 is_connected_to() { # is_connected_to <id>
-    [ "$(ctl_json status | jq -r '.Status.connected.destination_id // empty')" = "$1" ]
+    [ "$(ctl_json status | jq -r '.data.connection | select(.type == "connected") | .destination')" = "$1" ]
 }
 
+# connecting and reconnecting are .connection types too; a teardown can outlive the switch to disconnected
 is_disconnected() {
     ctl_json status | jq -e '
-        .Status
-        | (.connected | not)
-          and (.connecting | not)
-          and (.reconnecting | not)
-          and ((.disconnecting | if type == "array" then length == 0 else not end))
+        .data
+        | .connection.type == "disconnected"
+          and ((.disconnecting // []) | length == 0)
     ' >/dev/null
 }
+
+is_running() { ctl_json status | jq -e '.data.run_mode.type == "running"' >/dev/null 2>&1; }
+
+has_destinations() { ctl_json status | jq -e '.data.destinations | length > 0' >/dev/null 2>&1; }
 
 wait_for() { # wait_for <fn> <timeout_s> <label> [<arg>]
     local fn="$1" to="$2" label="$3" arg="${4:-}" i=0
@@ -250,12 +286,14 @@ spawn_daemon() {
     printf %s "$GVPN_IDENTITY_PASS" >"$pass_file"
     place_file "$pass_file" "$data_dir/hopr.pass"
     rm -f "$pass_file"
-    # without the .safe the client onboards a new, unfunded Safe and sits in PreparingSafe forever
+    # without the .safe the client onboards a new, unfunded Safe and sits in preparing_safe forever
     [ -n "$GVPN_IDENTITY_SAFE" ] && place_file "$GVPN_IDENTITY_SAFE" "$cache_dir/hopr.safe"
     chmod 0600 "$data_dir/hopr.id" "$data_dir/hopr.pass"
 
     echo "-- spawning gnosis_vpn-root (log $SPAWN_LOG)"
+    # The packaged service sets GNOSISVPN_FORCE_STATIC_ROUTING; pass it on so a gate runs what ships.
     sudo RUST_LOG="${DAEMON_LOG_LEVEL:-info,gnosis_vpn_root=debug,gnosis_vpn_lib=debug}" \
+        ${GNOSISVPN_FORCE_STATIC_ROUTING:+"GNOSISVPN_FORCE_STATIC_ROUTING=$GNOSISVPN_FORCE_STATIC_ROUTING"} \
         "$GVPN_ROOT_BIN" \
         --config-path "$GVPN_CONFIG" \
         --hopr-blokli-url "$GVPN_BLOKLI_URL" \
@@ -278,7 +316,7 @@ spawn_daemon() {
     # A spawned worker sits in Init for a while; a tour started there finds no destinations.
     i=0
     while [ "$i" -lt "$SPAWN_READY_TRIES" ]; do
-        if ctl_json status 2>/dev/null | jq -e '.Status.run_mode | objects | has("Running")' >/dev/null 2>&1; then
+        if is_running; then
             echo "-- daemon up (run_mode Running)"
             return 0
         fi
@@ -305,30 +343,32 @@ fi
 
 [ "$CLIENT_MODE" = "spawn" ] && spawn_daemon
 
-if ! ctl_json status | jq -e '.Status' >/dev/null; then
+if ! ctl_json status | jq -e '.type == "status"' >/dev/null; then
     echo "cannot reach the client's control socket via ${CLIENT_MODE} mode" >&2
     exit 2
 fi
 
 # The worker returns to idle mode once its start-client keep-alive expires,
-# which leaves the socket answering but run_mode "NotRunning" and every route_health null.
-if ctl_json status | jq -e '.Status.run_mode == "NotRunning"' >/dev/null; then
+# which leaves the socket answering but run_mode not_running and every route_health null.
+if ctl_json status | jq -e '.data.run_mode.type == "not_running"' >/dev/null; then
     echo "-- worker idle; starting client (keep-alive ${WORKER_KEEPALIVE})"
     start_client "$WORKER_KEEPALIVE" >/dev/null || {
         echo "failed to start the client worker" >&2
         exit 2
     }
     for _ in $(seq 1 "$WORKER_START_TRIES"); do
-        ctl_json status | jq -e '.Status.run_mode | objects | has("Running")' >/dev/null && break
+        is_running && break
         sleep 5
     done
 fi
 
 if [ ${#EXITS[@]} -eq 0 ]; then
+    # A v7 config may list no exits; the node discovers them on-chain once running, in one snapshot.
+    wait_for has_destinations "$DEST_READY_TIMEOUT" "exit discovery" || true
     # not mapfile: macOS ships bash 3.2
     while IFS= read -r dest_id; do
         [ -n "$dest_id" ] && EXITS+=("$dest_id")
-    done < <(ctl_json status | jq -r '.Status.destinations[].destination.id')
+    done < <(ctl_json status | jq -r '.data.destinations[].destination.id')
 fi
 if [ ${#EXITS[@]} -eq 0 ]; then
     echo "no destinations configured on the client" >&2
@@ -368,7 +408,10 @@ trap cleanup EXIT INT TERM
 if [ "$CLIENT_MODE" != "container" ]; then
     if ! curl -sf --max-time 3 "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then
         echo "== starting obscura serve =="
-        "$OBSCURA" serve --port "$CDP_PORT" --stealth >"$OUTDIR/obscura-serve.log" 2>&1 &
+        # obscura's own page.goto deadline defaults to 30s, below the harness's
+        # NAV_TIMEOUT_MS, so heavy pages died on obscura's clock, not ours.
+        OBSCURA_NAV_TIMEOUT_MS="${OBSCURA_NAV_TIMEOUT_MS:-${NAV_TIMEOUT_MS:-90000}}" \
+            "$OBSCURA" serve --port "$CDP_PORT" --stealth >"$OUTDIR/obscura-serve.log" 2>&1 &
         STARTED_OBSCURA=$!
         for _ in $(seq 1 20); do
             curl -sf --max-time 2 "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1 && break
@@ -391,18 +434,30 @@ jq -n \
     )" \
     --arg client_mode "$CLIENT_MODE" \
     --arg testenv_commit "$(repo_commit "$HERE/..")" \
-    --arg client_commit "$(repo_commit "${GVPN_CLIENT_DIR:-$HERE/../../gnosis_vpn-client}")" \
+    --arg client_commit "${GATE_CLIENT_COMMIT:-$(repo_commit "${GVPN_CLIENT_DIR:-$HERE/../../gnosis_vpn-client}")}" \
     --arg server_commit "$(repo_commit "${GVPN_SERVER_DIR:-$HERE/../../gnosis_vpn-server}")" \
-    --arg hoprd_commit "$(repo_commit "${HOPRD_DIR:-$HERE/../../hoprd}")" \
+    --arg hoprd_commit "$([ -n "${GATE_HOPRD_VERSION:-}" ] || repo_commit "${HOPRD_DIR:-$HERE/../../hoprd}")" \
     --arg cluster_size "${CLUSTER_SIZE:-}" \
     --arg server_count "${SERVER_COUNT:-}" \
     --arg hops "${HOPS:-}" \
     --arg quick "$QUICK" \
+    --arg browser "$BROWSER" \
+    --arg network "${GATE_NETWORK:-}" \
+    --arg identity "${GVPN_IDENTITY:-}" \
+    --arg hoprd_version "${GATE_HOPRD_VERSION:-}" \
+    --arg client_version "${GATE_CLIENT_VERSION:-}" \
+    --arg download_runs "$DOWNLOAD_RUNS" \
+    --arg download_window "$DOWNLOAD_WINDOW_SECS" \
+    --arg download_url "${DOWNLOAD_URL:-}" \
     --arg ping_targets "$PING_TARGETS" \
     --arg machine "$(uname -sm)" \
     --arg disconnected_baseline_trace "$BASELINE_TRACE" \
     '{
        run_ts: $run_ts, exits: $exits, client_mode: $client_mode, quick: ($quick == "1"),
+       browser: ($browser == "1"),
+       gate: { network: $network, identity: $identity, hoprd_version: $hoprd_version,
+               client_version: $client_version },
+       download: { runs: ($download_runs | tonumber), window_secs: ($download_window | tonumber), url: $download_url },
        commits: { testenv: $testenv_commit, gnosis_vpn_client: $client_commit,
                   gnosis_vpn_server: $server_commit, hoprd: $hoprd_commit },
        stack: { cluster_size: $cluster_size, server_count: $server_count, hops: $hops },
@@ -427,6 +482,7 @@ drive_harness() {
             --env PING_TARGETS="$PING_TARGETS" \
             --env YT_VIDEO_INDEX="$YT_VIDEO_INDEX" \
             ${NAV_TIMEOUT_MS:+--env NAV_TIMEOUT_MS="$NAV_TIMEOUT_MS"} \
+            ${OBSCURA_NAV_TIMEOUT_MS:+--env OBSCURA_NAV_TIMEOUT_MS="$OBSCURA_NAV_TIMEOUT_MS"} \
             ${DOWNLOAD_SECS:+--env DOWNLOAD_SECS="$DOWNLOAD_SECS"} \
             ${UPLOAD_SECS:+--env UPLOAD_SECS="$UPLOAD_SECS"} \
             ${DWELL_MS:+--env DWELL_MS="$DWELL_MS"} \
@@ -460,6 +516,25 @@ fatal_record() {
     jq -n --arg exit "$1" --arg err "$2" '{exit: $exit, fatal_error: $err}' >"$OUTDIR/$1.json"
 }
 
+# run_download <exit> -> 100 MB pulls through the still-connected tunnel, <OUTDIR>/<exit>.download.csv
+run_download() {
+    local exit_id="$1"
+    [ "$DOWNLOAD_RUNS" -gt 0 ] || return 0
+    if [ "$CLIENT_MODE" = "container" ]; then
+        docker run --rm --name "$SIDECAR_NAME" \
+            --network "container:$CLIENT_CONTAINER" \
+            --volume "$OUTDIR:/out" \
+            --env DOWNLOAD_RUNS --env DOWNLOAD_WINDOW_SECS \
+            ${DOWNLOAD_URL:+--env DOWNLOAD_URL} \
+            ${DOWNLOAD_SLEEP_SECS:+--env DOWNLOAD_SLEEP_SECS} \
+            ${DOWNLOAD_HTTP3:+--env DOWNLOAD_HTTP3} \
+            --entrypoint /app/download.sh \
+            "$E2E_IMAGE" "$exit_id" /out
+    else
+        "$HERE/download.sh" "$exit_id" "$OUTDIR"
+    fi 2>&1 | tee "$OUTDIR/$exit_id.download.log"
+}
+
 for EXIT_ID in "${EXITS[@]}"; do
     echo ""
     echo "======================================================================"
@@ -469,28 +544,28 @@ for EXIT_ID in "${EXITS[@]}"; do
     ensure_disconnected
 
     # Skip fast instead of burning CONNECT_TIMEOUT: route_health already knows when a
-    # destination cannot be dialled (NeedsChannel with too few relays, Unrecoverable/NotAllowed
-    # for a hop count the network refuses, NeedsPeering while the client is still warming up).
-    # NeedsPeering/NoHealth are warm-up states, not verdicts — poll until the destination is
-    # dialable (or clearly is not) rather than skipping the moment the client is still settling.
+    # destination cannot be dialled (not_routable with no plannable path, unrecoverable:
+    # not_allowed for a hop count the network refuses). not_routable and a missing route_health
+    # are also warm-up states, so poll until routable rather than skipping while the client settles.
     rh_waited=0
     while :; do
         rh_state="$(ctl_json status | jq -r --arg id "$EXIT_ID" '
-            .Status.destinations[] | select(.destination.id == $id)
-            | .route_health.state.state // .route_health.state // "unknown"')"
-        case "$rh_state" in
-        ReadyToConnect | Connecting | Routable) break ;;
-        esac
+            first(.data.destinations[] | select(.destination.id == $id)) // null
+            | if . == null then "unknown"
+              elif .route_health == null then "no_route_health"
+              elif .route_health.state.type == "unrecoverable" then "unrecoverable: " + .route_health.state.reason.type
+              else .route_health.state.type end')"
+        [ "$rh_state" = routable ] && break
         [ "$rh_waited" -ge "$DEST_READY_TIMEOUT" ] && break
         [ "$rh_waited" -eq 0 ] && echo "-- waiting up to ${DEST_READY_TIMEOUT}s for $EXIT_ID to become dialable (state: $rh_state)"
         sleep 5
         rh_waited=$((rh_waited + 5))
     done
     rh_reason="$(ctl_json status | jq -r --arg id "$EXIT_ID" '
-        .Status.destinations[] | select(.destination.id == $id)
-        | .route_health.state.reason // .route_health.last_error // ""')"
+        .data.destinations[] | select(.destination.id == $id)
+        | .route_health.state.reason.error // .route_health.last_error // ""')"
     case "$rh_state" in
-    ReadyToConnect | Connecting | Routable) ;;
+    routable) ;;
     *)
         echo "!! $EXIT_ID not connectable (state: $rh_state${rh_reason:+, reason: $rh_reason}) — skipping"
         fatal_record "$EXIT_ID" "not connectable (state: $rh_state${rh_reason:+, reason: $rh_reason})"
@@ -522,7 +597,13 @@ for EXIT_ID in "${EXITS[@]}"; do
 
     ctl_json nerd-stats >"$OUTDIR/$EXIT_ID.nerdstats.json" || true
 
-    run_harness "$EXIT_ID"
+    if [ "$BROWSER" -eq 1 ]; then
+        run_harness "$EXIT_ID"
+    else
+        # aggregate.mjs keys rows off <exit>.json; a download-only run still needs one
+        jq -n --arg exit "$EXIT_ID" '{exit: $exit, browser_skipped: true}' >"$OUTDIR/$EXIT_ID.json"
+    fi
+    run_download "$EXIT_ID"
 
     echo "-- disconnect $EXIT_ID"
     ctl disconnect >/dev/null 2>&1
@@ -536,16 +617,21 @@ EXIT_ORDER="$(
     IFS=,
     echo "${EXITS[*]}"
 )"
+# aggregate.mjs exits non-zero when the release-gate verdict fails; that is this script's exit code.
+AGGREGATE_RC=0
 if [ "$CLIENT_MODE" = "container" ]; then
     # keeps node off the host's dependency list — the image already has it
     docker run --rm \
         --volume "$OUTDIR:/out" \
         --env OUTDIR=/out \
         --env EXIT_ORDER="$EXIT_ORDER" \
+        ${GATE_REQUIRED_SITES:+--env GATE_REQUIRED_SITES} \
         --entrypoint node \
-        "$E2E_IMAGE" /app/aggregate.mjs
+        "$E2E_IMAGE" /app/aggregate.mjs || AGGREGATE_RC=$?
 else
-    OUTDIR="$OUTDIR" EXIT_ORDER="$EXIT_ORDER" node "$HERE/aggregate.mjs"
+    OUTDIR="$OUTDIR" EXIT_ORDER="$EXIT_ORDER" node "$HERE/aggregate.mjs" || AGGREGATE_RC=$?
 fi
 
 echo "== done -> $OUTDIR =="
+# cleanup exits with the last status; a plain `exit` here makes shellcheck lose the trap-only functions (SC2329)
+[ "$AGGREGATE_RC" -eq 0 ]

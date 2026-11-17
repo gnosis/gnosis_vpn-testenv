@@ -63,12 +63,13 @@ E2E_BLOKLI_URL=https://blokli.jura.dev.gnosisvpn.io \
 
 **Reuse your existing safe.** The `.safe` file must accompany the identity —
 without it the client cannot find its safe association and onboards a brand new,
-unfunded one instead, parking in `run_mode: PreparingSafe` forever. The recipe
+unfunded one instead, parking in `run_mode: preparing_safe` forever. The recipe
 picks up `<identity>.safe` automatically and warns loudly if it is missing.
 
-**Destinations are discovered**, not configured here: whatever `E2E_CONFIG`
-defines shows up via `gnosis_vpn-ctl status`. Add `--destination USA`
-(repeatable) to narrow it.
+**Destinations** are whatever `gnosis_vpn-ctl status` reports: those
+`E2E_CONFIG` defines plus, with a `version = 7` config, the exits the client
+discovers on-chain (the run waits up to `DEST_READY_TIMEOUT` for the first
+discovery). Add `--destination <id>` (repeatable) to narrow it.
 
 `sudo` is required — `gnosis_vpn-root` creates the WireGuard interface and edits
 the routing table, exactly as `just system-tests` does. The suite keeps the sudo
@@ -134,6 +135,13 @@ on the host. That mode needs `node` and `obscura` on `PATH`.
   whole destination window: min/avg/max/loss. Default `1.1.1.1` plus the tunnel
   gateway `10.129.0.1` (the wg peer address `gen-config` writes into
   `client.toml`).
+- **100 MB downloads** (`download.sh`). After the browser pass, still on the
+  same connection, the tour pulls a 100 MB file `DOWNLOAD_RUNS` times (default
+  3), 15 s apart. All pulls share a `DOWNLOAD_WINDOW_SECS` budget (default 840).
+  Each `curl` is capped at whatever is left of the window, so on a slow exit the
+  row is recorded as `truncated` (some bytes) or `stalled` (none) instead of the
+  pull overrunning the tour. Every attempt is written to `<ID>.download.csv`.
+  See [Downloads](#downloads).
 - **Egress trace** — Cloudflare `trace` (`ip`, `loc`, `colo`) recorded as
   **metadata only**. Every testenv exit NATs through the same host, so `loc`
   carries no signal here and never causes a destination to be skipped.
@@ -146,45 +154,95 @@ Written to `$E2E_OUT_DIR/<UTC-timestamp>/` (default
 - `<ID>.json` — full per-destination record (egress, navigations, crawl,
   speedtests, ping).
 - `<ID>.nerdstats.json` — `nerd-stats` snapshot (hop path, route rtt, sessions).
-- `summary.csv` — one row per destination, the headline numbers. Also printed to
-  stdout at the end of a run, so it can be piped straight into another tool.
+- `<ID>.download.csv` — one row per 100 MB pull. Columns: outcome, bytes, Mbps,
+  total/DNS/connect/TTFB seconds, negotiated HTTP version, remote IP.
+- `summary.csv` — one row per destination, the headline numbers (incl.
+  `dl_ok_runs`, `dl_median_mbps`, `dl_http_version`). Also printed to stdout at
+  the end of a run, so it can be piped straight into another tool.
+- `verdict.json` / `report.md` — the release-gate verdict (see below).
 - `meta.json` — run label: timestamp, component commits, `CLUSTER_SIZE` /
   `SERVER_COUNT` / `HOPS`, machine, and the disconnected-baseline egress. **This
   is what makes two runs comparable.**
+
+## Verdict
+
+`aggregate.mjs` judges each destination, and `run.sh` exits with the result:
+
+- **FAIL** if the destination has a `fatal_error` (not connectable, connect
+  timeout, harness crash), or if any of `GATE_REQUIRED_SITES` (default
+  `wikipedia,bbc,github,amazon`) did not load `ok`.
+- **PASS** if every judged destination passes.
+- **NOT JUDGED** if nothing was judged (`--no-browser`). The exit code is 0.
+
+Everything else is informational: heavy pages, speedtest and downloads. This is
+what [`RELEASE_GATE.md`](../RELEASE_GATE.md) builds on.
+
+## Downloads
+
+The default URL is CacheFly `100mb.test`, which serves 104857600 bytes and
+speaks HTTP/3. `speed.cloudflare.com` does not: it answers `http/1.1` even when
+h2 is offered. Use `https://proof.ovh.net/files/100Mb.dat` to compare every exit
+against one fixed origin instead of each exit's nearest CDN node.
+
+`DOWNLOAD_HTTP3` controls HTTP/3:
+
+- `auto` (the default) uses HTTP/3 when curl advertises the `HTTP3` feature and
+  falls back to HTTP/2 otherwise.
+- `on` fails if curl has no HTTP/3.
+- `off` disables it.
+
+The curl in the `nix develop` shell has HTTP/3. macOS system curl does not
+(`CURL_BIN=/opt/homebrew/opt/curl/bin/curl` works). The sidecar image's Debian
+curl does not either, so container-mode runs record `HTTP/2`. The negotiated
+version is written per row either way.
 
 ## Knobs
 
 All env vars, all optional: `NAV_TIMEOUT_MS`, `DOWNLOAD_SECS`, `UPLOAD_SECS`,
 `DWELL_MS`, `CRAWL_START`, `CRAWL_HOPS`, `SPEEDTEST_RUNS`, `YT_VIDEO_INDEX`,
 `PING_TARGETS`, `SETTLE_SECS`, `CONNECT_TIMEOUT`, `CLIENT_CONTAINER`,
-`E2E_IMAGE`, `E2E_OUT_DIR`. `run.sh --help` lists the flags.
+`E2E_IMAGE`, `E2E_OUT_DIR`, `DOWNLOAD_RUNS`, `DOWNLOAD_WINDOW_SECS`,
+`DOWNLOAD_SLEEP_SECS`, `DOWNLOAD_URL`, `DOWNLOAD_HTTP3`, `CURL_BIN`,
+`GATE_REQUIRED_SITES`. `run.sh --help` lists the flags. `DOWNLOAD_SECS` and
+`UPLOAD_SECS` size the in-browser speedtest. The 100 MB pulls use the
+`DOWNLOAD_*` knobs above.
+
+Flags: `--download-runs N` (0 turns the pulls off), `--download-window SECS`,
+`--download-url URL`, and `--no-browser` (pulls only).
 
 `--quick` is shorthand for
 `DOWNLOAD_SECS=20 UPLOAD_SECS=10 CRAWL_HOPS=2
-SPEEDTEST_RUNS=1`.
+SPEEDTEST_RUNS=1 DOWNLOAD_RUNS=1 DOWNLOAD_WINDOW_SECS=300`.
 
 ## Files
 
-| File            | Role                                                                       |
-| --------------- | -------------------------------------------------------------------------- |
-| `run.sh`        | orchestrator: connect / settle / drive / disconnect / aggregate            |
-| `harness.mjs`   | per-destination driver over obscura CDP (browsing, crawl, speedtest, ping) |
-| `aggregate.mjs` | builds `summary.csv` + prints the table                                    |
-| `Dockerfile`    | sidecar image: node + obscura (pinned per arch) + the harness              |
-| `entrypoint.sh` | starts obscura's CDP server, then runs the harness                         |
+| File            | Role                                                                        |
+| --------------- | --------------------------------------------------------------------------- |
+| `run.sh`        | orchestrator: connect / settle / drive / disconnect / aggregate             |
+| `harness.mjs`   | per-destination driver over obscura CDP (browsing, crawl, speedtest, ping)  |
+| `aggregate.mjs` | builds `summary.csv`, prints the table, writes `verdict.json` + `report.md` |
+| `download.sh`   | 100 MB pulls through the connected tunnel (`<ID>.download.csv`)             |
+| `tests/`        | offline bats tests (`just test-scripts`)                                    |
+| `Dockerfile`    | sidecar image: node + obscura (pinned per arch) + the harness               |
+| `entrypoint.sh` | starts obscura's CDP server, then runs the harness                          |
 
 ## Notes & caveats (learned the hard way)
 
 - **obscura ~30 s cap.** obscura aborts any single CDP `page.evaluate`
-  (`Runtime.callFunctionOn`) **and** `page.goto` at ~30 s. The speedtest is
-  therefore chunked into short Node-orchestrated calls with adaptive sizing, and
-  every in-page fetch has an `AbortController` < 30 s so a stall fails
-  gracefully instead of killing the run. Don't reintroduce a single long-running
-  `evaluate`.
-- **Heavy pages over a capped tunnel.** A 4–5 MB page (YouTube/CNN) may not
-  finish DOMContentLoaded within obscura's 30 s over a ~2 Mbps tunnel → recorded
-  as `timeout`/`error`. That's a real signal, not a harness bug. Reddit returns
-  403 to the headless UA. Light pages (Wikipedia/BBC/GitHub/Amazon) render fine.
+  (`Runtime.callFunctionOn`) at ~30 s. The speedtest is therefore chunked into
+  short Node-orchestrated calls with adaptive sizing, and every in-page fetch
+  has an `AbortController` < 30 s so a stall fails gracefully instead of killing
+  the run. Don't reintroduce a single long-running `evaluate`. `page.goto`
+  shared that 30 s deadline and so failed heavy pages on obscura's clock rather
+  than the harness's. `run.sh` and `entrypoint.sh` now launch obscura with
+  `OBSCURA_NAV_TIMEOUT_MS` set to `NAV_TIMEOUT_MS` (90 s default), so navigation
+  gets the budget the harness intends. There is no CLI flag for it; the env var
+  is the only knob. Runs before this change are not comparable on the heavy
+  pages.
+- **Heavy pages over a capped tunnel.** A 4–5 MB page (YouTube/CNN) may still
+  not finish DOMContentLoaded over a ~2 Mbps tunnel → recorded as
+  `timeout`/`error`. That's a real signal, not a harness bug. Reddit returns 403
+  to the headless UA. Light pages (Wikipedia/BBC/GitHub/Amazon) render fine.
 - **Throughput cap.** Download is paced by SURB balancing
   (`[connection.surb_balancing.main] max_surb_upstream`). The speedtest reads
   whatever the tunnel allows — that IS the measurement. Raising the cap needs a
@@ -200,5 +258,5 @@ SPEEDTEST_RUNS=1`.
 - **"connected" ≠ routing.** The control plane can report connected while
   traffic still egresses locally, or while the exit health is flapping. `run.sh`
   waits `SETTLE_SECS` after connect before measuring; raise it if early probes
-  look wrong. If a destination is stuck `Routable`/`Unrecoverable`, wait for it
-  to reach `ReadyToConnect`.
+  look wrong. A destination stuck `not_routable` has no plannable path yet;
+  `unrecoverable` needs a config change or an exit upgrade.

@@ -323,6 +323,20 @@ e2e *ARGS: build-e2e
 e2e-on-network *ARGS:
     @scripts/testenv/e2e-on-network.sh {{ARGS}}
 
+# ─── Release gate (see RELEASE_GATE.md) ──────────────────────────────────────
+
+# Network the gate runs on: a configs/<network>/ dir (network.env + config.toml)
+GATE_NETWORK := env_var_or_default("GATE_NETWORK", "piz-palu-staging")
+
+# Full tunnel, sudo, the worker as you. Needs GVPN_IDENTITY and GATE_HOPRD_VERSION.
+# Run the client in GATE_CLIENT_BIN_DIR through every exit of GATE_NETWORK; exits non-zero unless PASS
+release-gate *ARGS:
+    @scripts/testenv/release-gate.sh run {{ARGS}}
+
+# Check every prerequisite of `release-gate` without connecting anything
+release-gate-preflight:
+    @scripts/testenv/release-gate.sh preflight
+
 # ─── Traffic target ──────────────────────────────────────────────────────────
 
 # Start the in-cluster traffic target: on the default bridge (reached through the exit) and on DOCKER_NETWORK (reached directly for baselines)
@@ -436,9 +450,9 @@ drain-report *args:
 wg-traffic *args:
     ./scripts/wg-traffic.sh {{ args }}
 
-# run the offline bats suite for scripts/ (no network, uses fakes)
+# run the offline bats suites for scripts/ and e2e/ (no network, uses fakes)
 test-scripts:
-    bats --print-output-on-failure scripts/tests
+    bats --print-output-on-failure scripts/tests e2e/tests
 
 # ─── Metrics ─────────────────────────────────────────────────────────────────
 
