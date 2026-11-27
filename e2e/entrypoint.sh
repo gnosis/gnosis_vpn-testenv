@@ -4,7 +4,9 @@ set -euo pipefail
 
 CDP_PORT="${CDP_PORT:-9222}"
 
-obscura serve --port "$CDP_PORT" --stealth >/tmp/obscura-serve.log 2>&1 &
+# obscura's page.goto deadline defaults to 30s, below the harness's NAV_TIMEOUT_MS
+OBSCURA_NAV_TIMEOUT_MS="${OBSCURA_NAV_TIMEOUT_MS:-${NAV_TIMEOUT_MS:-90000}}" \
+    obscura serve --port "$CDP_PORT" --stealth >/tmp/obscura-serve.log 2>&1 &
 OBSCURA_PID=$!
 trap 'kill "$OBSCURA_PID" 2>/dev/null || true' EXIT
 

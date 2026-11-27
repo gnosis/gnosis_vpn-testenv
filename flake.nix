@@ -59,6 +59,10 @@
                 nodejs
                 gettext
                 jq
+                # release gate: identity and password from products-ci, HTTP/3 for the 100 MB pulls
+                yq-go
+                sops
+                curl
                 just
                 (python3.withPackages (ps: [ ps.pytest ]))
                 bats

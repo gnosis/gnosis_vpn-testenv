@@ -1,11 +1,15 @@
-// Build summary.csv from per-exit JSONs in OUTDIR and print a table.
-import { readFileSync, writeFileSync, readdirSync } from "fs";
+// Build summary.csv from per-exit JSONs in OUTDIR, print a table, then write the
+// release-gate verdict (verdict.json + report.md) and exit 1 when it fails.
+import { existsSync, readFileSync, writeFileSync, readdirSync } from "fs";
 
 const OUTDIR = process.env.OUTDIR || ".";
-// Only the per-exit records: the same directory also holds meta.json and the <EXIT>.nerdstats.json snapshots, which would otherwise land as blank rows.
+// Only the per-exit records: the same directory also holds meta.json, verdict.json and the <EXIT>.nerdstats.json snapshots, which would otherwise land as blank rows.
 const files = readdirSync(OUTDIR).filter(
   (f) =>
-    f.endsWith(".json") && f !== "meta.json" && !f.endsWith(".nerdstats.json"),
+    f.endsWith(".json") &&
+    f !== "meta.json" &&
+    f !== "verdict.json" &&
+    !f.endsWith(".nerdstats.json"),
 );
 const rows = [];
 
@@ -31,8 +35,52 @@ const cols = [
   "ul2_mbps",
   "st_lat_avg_ms",
   "st_jitter_ms",
+  "dl_ok_runs",
+  "dl_median_mbps",
+  "dl_http_version",
   "wall_secs",
 ];
+
+// Heavy pages (YouTube/CNN) and Reddit (403 to headless) are informational; these must load.
+const GATE_REQUIRED_SITES = (
+  process.env.GATE_REQUIRED_SITES || "wikipedia,bbc,github,amazon"
+)
+  .split(",")
+  .filter(Boolean);
+
+const median = (xs) => {
+  if (!xs.length) return "";
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : +((s[m - 1] + s[m]) / 2).toFixed(2);
+};
+
+// <exit>.download.csv from download.sh; plain split is safe, no field holds a comma.
+const readDownloads = (exit) => {
+  const path = `${OUTDIR}/${exit}.download.csv`;
+  if (!existsSync(path)) return null;
+  const [header, ...lines] = readFileSync(path, "utf8").trim().split("\n");
+  const keys = header.split(",");
+  return lines.map((l) =>
+    Object.fromEntries(l.split(",").map((v, i) => [keys[i], v]))
+  );
+};
+
+// verdictFor(record) -> { pass, reasons } ; pass is null when there was nothing to judge
+const verdictFor = (j) => {
+  if (j.fatal_error) return { pass: false, reasons: [j.fatal_error] };
+  if (j.browser_skipped) {
+    return { pass: null, reasons: ["browser skipped, not judged"] };
+  }
+  const navs = j.navigations || [];
+  const reasons = GATE_REQUIRED_SITES.flatMap((label) => {
+    const n = navs.find((x) => x.label === label);
+    if (!n) return [`${label}: not visited`];
+    return n.outcome === "ok" ? [] : [`${label}: ${n.outcome}${n.error ? ` (${n.error})` : ""}`];
+  });
+  return { pass: reasons.length === 0, reasons };
+};
+const verdicts = {};
 
 for (const f of files) {
   const j = JSON.parse(readFileSync(`${OUTDIR}/${f}`, "utf8"));
@@ -52,6 +100,9 @@ for (const f of files) {
   const hops = j.crawl || [];
   const hopsOk = hops.filter((h) => h.outcome === "ok");
   const watch = navs.find((n) => n.video);
+  const dls = readDownloads(j.exit) || [];
+  const dlOk = dls.filter((d) => d.outcome === "ok");
+  verdicts[j.exit] = verdictFor(j);
   rows.push({
     exit: j.exit,
     egress_loc: j.egress?.loc ?? "",
@@ -78,6 +129,9 @@ for (const f of files) {
     ul2_mbps: st[1]?.upload?.mbps ?? "",
     st_lat_avg_ms: st[0]?.latency?.avg_ms ?? "",
     st_jitter_ms: st[0]?.latency?.jitter_ms ?? "",
+    dl_ok_runs: dls.length ? `${dlOk.length}/${dls.length}` : "",
+    dl_median_mbps: median(dlOk.map((d) => +d.mbps)),
+    dl_http_version: [...new Set(dlOk.map((d) => d.http_version))].join(" "),
     wall_secs: j.wall_secs ?? "",
   });
 }
@@ -106,3 +160,90 @@ for (const r of rows) console.log(line(cols.map((c) => r[c])));
 
 console.log("\n--- summary.csv ---");
 process.stdout.write(csv + "\n");
+
+// ─── Release-gate verdict ─────────────────────────────────────────────────────
+
+const judged = Object.values(verdicts).filter((v) => v.pass !== null);
+const gatePass = judged.length > 0 && judged.every((v) => v.pass);
+const gateLabel = judged.length === 0 ? "NOT JUDGED" : gatePass ? "PASS" : "FAIL";
+
+const meta = existsSync(`${OUTDIR}/meta.json`)
+  ? JSON.parse(readFileSync(`${OUTDIR}/meta.json`, "utf8"))
+  : {};
+const gate = meta.gate ?? {};
+
+writeFileSync(
+  `${OUTDIR}/verdict.json`,
+  JSON.stringify(
+    {
+      verdict: gateLabel,
+      run_ts: meta.run_ts ?? "",
+      network: gate.network ?? "",
+      hoprd_version: gate.hoprd_version ?? "",
+      client: {
+        commit: meta.commits?.gnosis_vpn_client ?? "",
+        version: gate.client_version ?? "",
+      },
+      testenv_commit: meta.commits?.testenv ?? "",
+      identity: gate.identity ?? "",
+      quick: meta.quick ?? false,
+      required_sites: GATE_REQUIRED_SITES,
+      exits: verdicts,
+    },
+    null,
+    2,
+  ) + "\n",
+);
+
+const mdRow = (vals) => `| ${vals.join(" | ")} |`;
+const reportCols = [
+  "exit",
+  "nav_ok",
+  "nav_total",
+  "avg_load_ms",
+  "crawl_ok",
+  "dl1_mbps",
+  "ul1_mbps",
+  "dl_ok_runs",
+  "dl_median_mbps",
+  "dl_http_version",
+  "ping1111_avg_ms",
+];
+const report = [
+  `# Gnosis VPN release gate: ${gateLabel}`,
+  "",
+  `- network: \`${gate.network || "?"}\``,
+  `- hoprd under test: \`${gate.hoprd_version || "?"}\``,
+  `- client: \`${gate.client_version || "?"}\` @ \`${meta.commits?.gnosis_vpn_client || "?"}\``,
+  `- testenv: \`${meta.commits?.testenv || "?"}\``,
+  `- identity: \`${gate.identity || "?"}\``,
+  `- run: \`${meta.run_ts ?? ""}\` (${meta.quick ? "quick" : "full"} profile, ${meta.client_mode ?? ""} mode)`,
+  `- machine: ${meta.machine ?? ""}`,
+  `- required sites: ${GATE_REQUIRED_SITES.join(", ")}`,
+  "",
+  "## Verdict per exit",
+  "",
+  mdRow(["exit", "verdict", "reasons"]),
+  mdRow(["---", "---", "---"]),
+  ...rows.map((r) => {
+    const v = verdicts[r.exit];
+    const label = v.pass === null ? "not judged" : v.pass ? "pass" : "FAIL";
+    return mdRow([r.exit, label, v.reasons.join("; ") || "-"]);
+  }),
+  "",
+  "## Measurements (informational)",
+  "",
+  mdRow(reportCols),
+  mdRow(reportCols.map(() => "---")),
+  ...rows.map((r) => mdRow(reportCols.map((c) => r[c] === "" ? "-" : r[c]))),
+  "",
+  "Raw data: `summary.csv`, `<exit>.json`, `<exit>.download.csv`, `meta.json` in this directory.",
+  "",
+].join("\n");
+writeFileSync(`${OUTDIR}/report.md`, report);
+
+console.log(`\n== release gate: ${gateLabel} (report: ${OUTDIR}/report.md)`);
+for (const [exit, v] of Object.entries(verdicts)) {
+  if (v.pass === false) console.log(`   ${exit}: ${v.reasons.join("; ")}`);
+}
+if (gateLabel === "FAIL") process.exit(1);
